@@ -23,12 +23,33 @@ else
     cpp_args = '-UHAVE_CUDA'
 endif
 
+xpu_inc = '/opt/intel/oneapi/compiler/latest/include/'
+xpu_lib = '/opt/intel/oneapi/compiler/latest/lib/'
+xpu_dep = declare_dependency(
+    link_args : ['-L' + xpu_lib, '-lsycl'],
+    include_directories : include_directories(xpu_inc))
+xpu_dependencies = [xpu_dep]
+cpp_args = '-DHAVE_XPU -fsycl -fsycl-targets=spir64 -Wno-deprecated-declarations'
+
 ucx_backend_test = executable('ucx_backend_test',
         'ucx_backend_test.cpp',
         dependencies: [nixl_dep, nixl_infra, nixl_common_deps, ucx_backend_dep, ucx_dep, thread_dep] + cuda_dependencies,
         include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/ucx'],
         cpp_args : cpp_args,
         install: true)
+
+ucx_backend_test = executable('ucx_backend_test_xpu_simple',
+        'ucx_backend_test_xpu_simple.cpp',
+        dependencies: [nixl_dep, nixl_infra, nixl_common_deps, ucx_backend_dep, ucx_dep, thread_dep] + xpu_dependencies,
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/ucx'],
+        cpp_args : cpp_args,
+        install: true)
+# ucx_backend_test_xpu = executable('ucx_backend_test_xpu',
+#         'ucx_backend_test_xpu.cpp',
+#         dependencies: [nixl_dep, nixl_infra, nixl_common_deps, ucx_backend_dep, ucx_dep, thread_dep] + xpu_dependencies,
+#         include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/ucx'],
+#         cpp_args : cpp_args,
+#         install: true)
 
 ucx_backend_multi = executable('ucx_backend_multi',
            'ucx_backend_multi.cpp',
