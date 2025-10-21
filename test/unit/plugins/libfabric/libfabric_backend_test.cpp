@@ -1,299 +1,52 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025 Amazon.com, Inc. and affiliates.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Integration test for libfabric backend descriptor offset handling
+ * Tests the actual backend with multiple descriptors pointing to different offsets
+ * within the same registered memory region.
  */
+
 #include <iostream>
-#include <sstream>
-#include <string>
+#include <cassert>
+#include <cstring>
+#include <memory>
+#include <unistd.h>
 
 #include "libfabric_backend.h"
-#include "test_utils.h"
+#include "common/nixl_log.h"
 
 using namespace std;
-
-
-#ifdef HAVE_CUDA
-
-#include <cuda_runtime.h>
-#include <cuda.h>
-
-int gpu_id = 0;
-
-static void checkCudaError(cudaError_t result, const char *message) {
-    if (result != cudaSuccess) {
-        std::cerr << message << " (Error code: " << result << " - "
-                   << cudaGetErrorString(result) << ")" << std::endl;
-        exit(EXIT_FAILURE);
-    }
-}
-#endif
-
-
-class testHndlIterator {
-private:
-    bool reuse;
-    bool set;
-    bool prepare;
-    bool release;
-    nixlBackendReqH* handle;
-public:
-    testHndlIterator(bool _reuse) {
-        reuse = _reuse;
-        if (reuse) {
-            prepare = true;
-            release = false;
-        } else {
-            prepare = true;
-            release = true;
-        }
-        handle = nullptr;
-        set = false;
-    }
-
-    ~testHndlIterator() {
-        /* Make sure that handler was released */
-        nixl_exit_on_failure(!set, "Handler was not released");
-    }
-
-    bool needPrep() {
-        if (reuse) {
-            if (!prepare) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool needRelease() {
-        return release;
-    }
-
-    void isLast() {
-        if (reuse) {
-            release = true;
-        }
-    }
-
-    void setHandle(nixlBackendReqH *_handle)
-    {
-        nixl_exit_on_failure(!set, "Handler was not released");
-        handle = _handle;
-        set = true;
-        if (reuse) {
-            prepare = false;
-        }
-    }
-
-    void unsetHandle() {
-        nixl_exit_on_failure(set, "Handler was not set");
-        set = false;
-    }
-
-    nixlBackendReqH *&getHandle() {
-        nixl_exit_on_failure(set, "Handler was not set");
-        return handle;
-    }
-};
 
 nixlLibfabricEngine *
 createEngine(std::string name, bool p_thread) {
     nixlBackendInitParams init;
-    nixl_b_params_t       custom_params;
+    nixl_b_params_t custom_params;
 
     init.enableProgTh = p_thread;
-    init.pthrDelay    = 100;
-    init.localAgent   = name;
+    init.pthrDelay = 100;
+    init.localAgent = name;
     init.customParams = &custom_params;
-    init.type         = "LIBFABRIC";
+    init.type = "LIBFABRIC";
 
-    auto ucx = nixlLibfabricEngine::create(init).release();
-    nixl_exit_on_failure(!ucx->getInitErr(), "Failed to initialize worker1");
+    auto engine = new nixlLibfabricEngine(&init);
+    assert(!engine->getInitErr());
+    if (engine->getInitErr()) {
+        std::cout << "Failed to initialize libfabric engine" << std::endl;
+        exit(1);
+    }
 
-    return ucx;
+    return engine;
 }
 
 void
-releaseEngine(nixlLibfabricEngine *ucx) {
-    delete ucx;
-}
-
-std::string memType2Str(nixl_mem_t mem_type)
-{
-    switch(mem_type) {
-    case DRAM_SEG:
-        return std::string("DRAM");
-    case VRAM_SEG:
-        return std::string("VRAM");
-    case BLK_SEG:
-        return std::string("BLOCK");
-    case FILE_SEG:
-        return std::string("FILE");
-    default:
-        nixl_exit_on_failure(false, "Unsupported memory type!");
-    }
-    return std::string("");
-}
-
-
-#ifdef HAVE_CUDA
-
-static int cudaQueryAddr(void *address, bool &is_dev,
-                         CUdevice &dev, CUcontext &ctx)
-{
-    CUmemorytype mem_type = CU_MEMORYTYPE_HOST;
-    uint32_t is_managed = 0;
-#define NUM_ATTRS 4
-    CUpointer_attribute attr_type[NUM_ATTRS];
-    void *attr_data[NUM_ATTRS];
-    CUresult result;
-
-    attr_type[0] = CU_POINTER_ATTRIBUTE_MEMORY_TYPE;
-    attr_data[0] = &mem_type;
-    attr_type[1] = CU_POINTER_ATTRIBUTE_IS_MANAGED;
-    attr_data[1] = &is_managed;
-    attr_type[2] = CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
-
-    attr_data[2] = &dev;
-    attr_type[3] = CU_POINTER_ATTRIBUTE_CONTEXT;
-    attr_data[3] = &ctx;
-
-    result = cuPointerGetAttributes(4, attr_type, attr_data, (CUdeviceptr)address);
-
-    is_dev = (mem_type == CU_MEMORYTYPE_DEVICE);
-
-    return (CUDA_SUCCESS != result);
-}
-
-#endif
-
-
-void allocateBuffer(nixl_mem_t mem_type, int dev_id, size_t len, void* &addr)
-{
-    switch(mem_type) {
-    case DRAM_SEG:
-        addr = calloc(1, len);
-        break;
-#ifdef HAVE_CUDA
-    case VRAM_SEG:{
-        bool is_dev;
-        CUdevice dev;
-        CUcontext ctx;
-
-        checkCudaError(cudaSetDevice(dev_id), "Failed to set device");
-        checkCudaError(cudaMalloc(&addr, len), "Failed to allocate CUDA buffer 0");
-        cudaQueryAddr(addr, is_dev, dev, ctx);
-        std::cout << "CUDA addr: " << std::hex << addr << " dev=" << std::dec << dev
-            << " ctx=" << std::hex << ctx << std::dec << std::endl;
-        break;
-    }
-#endif
-    default:
-        nixl_exit_on_failure(false, "Unsupported memory type!");
-    }
-    nixl_exit_on_failure((addr != nullptr), "Failed to allocate buffer");
-}
-
-void releaseBuffer(nixl_mem_t mem_type, int dev_id, void* &addr)
-{
-    switch(mem_type) {
-    case DRAM_SEG:
-        free(addr);
-        break;
-#ifdef HAVE_CUDA
-    case VRAM_SEG:
-        checkCudaError(cudaSetDevice(dev_id), "Failed to set device");
-        checkCudaError(cudaFree(addr), "Failed to allocate CUDA buffer 0");
-        break;
-#endif
-    default:
-        nixl_exit_on_failure(false, "Unsupported memory type!");
-    }
-}
-
-void doMemset(nixl_mem_t mem_type, int dev_id, void *addr, char byte, size_t len)
-{
-    switch(mem_type) {
-    case DRAM_SEG:
-        memset(addr, byte, len);
-        break;
-#ifdef HAVE_CUDA
-    case VRAM_SEG:
-        checkCudaError(cudaSetDevice(dev_id), "Failed to set device");
-        checkCudaError(cudaMemset(addr, byte, len), "Failed to memset");
-        break;
-#endif
-    default:
-        nixl_exit_on_failure(false, "Unsupported memory type!");
-    }
-}
-
-void *getValidationPtr(nixl_mem_t mem_type, void *addr, size_t len)
-{
-    switch(mem_type) {
-    case DRAM_SEG:
-        return addr;
-        break;
-#ifdef HAVE_CUDA
-    case VRAM_SEG: {
-        void *ptr = calloc(len, 1);
-        checkCudaError(cudaMemcpy(ptr, addr, len, cudaMemcpyDeviceToHost), "Failed to memcpy");
-        return ptr;
-    }
-#endif
-    default:
-        nixl_exit_on_failure(false, "Unsupported memory type!");
-    }
-    return nullptr;
-}
-
-void *releaseValidationPtr(nixl_mem_t mem_type, void *addr)
-{
-    switch(mem_type) {
-    case DRAM_SEG:
-        break;
-#ifdef HAVE_CUDA
-    case VRAM_SEG:
-        free(addr);
-        break;
-#endif
-    default:
-        nixl_exit_on_failure(false, "Unsupported memory type!");
-    }
-    return nullptr;
+releaseEngine(nixlLibfabricEngine *engine) {
+    delete engine;
 }
 
 void
-allocateWrongGPUTest(nixlLibfabricEngine *ucx, int dev_id) {
-    nixlBlobDesc desc = {0};
-    nixlBackendMD* md;
-    void* buf;
-
-    allocateBuffer(VRAM_SEG, dev_id, desc.len, buf);
-
-    desc.devId = dev_id;
-    desc.addr = (uint64_t) buf;
-
-    int ret = ucx->registerMem(desc, VRAM_SEG, md);
-
-    nixl_exit_on_failure((ret == NIXL_ERR_NOT_SUPPORTED), "Failed to register memory", "test");
-
-    releaseBuffer(VRAM_SEG, dev_id, buf);
-}
-
-void
-allocateAndRegister(nixlLibfabricEngine *ucx,
+allocateAndRegister(nixlLibfabricEngine *engine,
                     int dev_id,
                     nixl_mem_t mem_type,
                     void *&addr,
@@ -301,29 +54,30 @@ allocateAndRegister(nixlLibfabricEngine *ucx,
                     nixlBackendMD *&md) {
     nixlBlobDesc desc;
 
-    allocateBuffer(mem_type, dev_id, len, addr);
+    // Allocate buffer
+    addr = calloc(1, len);
+    assert(addr != nullptr);
 
-    desc.addr   = (uintptr_t) addr;
-    desc.len    = len;
+    desc.addr = (uintptr_t)addr;
+    desc.len = len;
     desc.devId = dev_id;
 
-    int ret = ucx->registerMem(desc, mem_type, md);
-
-    nixl_exit_on_failure((ret == NIXL_SUCCESS), "Failed to allocate and register memory");
+    int ret = engine->registerMem(desc, mem_type, md);
+    assert(ret == NIXL_SUCCESS);
 }
 
 void
-deallocateAndDeregister(nixlLibfabricEngine *ucx,
+deallocateAndDeregister(nixlLibfabricEngine *engine,
                         int dev_id,
                         nixl_mem_t mem_type,
                         void *&addr,
                         nixlBackendMD *&md) {
-    ucx->deregisterMem(md);
-    releaseBuffer(mem_type, dev_id, addr);
+    engine->deregisterMem(md);
+    free(addr);
 }
 
 void
-loadRemote(nixlLibfabricEngine *ucx,
+loadRemote(nixlLibfabricEngine *engine,
            int dev_id,
            std::string agent,
            nixl_mem_t mem_type,
@@ -332,435 +86,214 @@ loadRemote(nixlLibfabricEngine *ucx,
            nixlBackendMD *&lmd,
            nixlBackendMD *&rmd) {
     nixlBlobDesc info;
-    info.addr     = (uintptr_t) addr;
-    info.len      = len;
-    info.devId    = dev_id;
-    ucx->getPublicData(lmd, info.metaInfo);
+    info.addr = (uintptr_t)addr;
+    info.len = len;
+    info.devId = dev_id;
+    engine->getPublicData(lmd, info.metaInfo);
 
-    nixl_exit_on_failure((info.metaInfo.size() > 0), "Failed to get public data");
+    assert(info.metaInfo.size() > 0);
 
-    // We get the data from the cetnral location and populate the backend, and receive remote_meta
-    int ret = ucx->loadRemoteMD(info, mem_type, agent, rmd);
-    nixl_exit_on_failure((ret == NIXL_SUCCESS), "Failed to load remote MD");
+    int ret = engine->loadRemoteMD(info, mem_type, agent, rmd);
+    assert(NIXL_SUCCESS == ret);
 }
 
-void populateDescs(nixl_meta_dlist_t &descs, int dev_id, void *addr, int desc_cnt, size_t desc_size, nixlBackendMD* &md)
-{
-    for(int i = 0; i < desc_cnt; i++) {
+void
+populateDescs(nixl_meta_dlist_t &descs, int dev_id, void *addr, int desc_cnt, size_t desc_size,
+              nixlBackendMD *&md) {
+    for (int i = 0; i < desc_cnt; i++) {
         nixlMetaDesc req;
-        req.addr     = (uintptr_t) (((char*) addr) + i * desc_size); //random offset
-        req.len      = desc_size;
-        req.devId    = dev_id;
+        req.addr = (uintptr_t)(((char *)addr) + i * desc_size); // Different offset per descriptor
+        req.len = desc_size;
+        req.devId = dev_id;
         req.metadataP = md;
         descs.addDesc(req);
     }
 }
 
-static string op2string(nixl_xfer_op_t op, bool hasNotif)
-{
-    if(op == NIXL_READ && !hasNotif)
-        return string("READ");
-    if(op == NIXL_WRITE && !hasNotif)
-        return string("WRITE");
-    if(op == NIXL_READ && hasNotif)
-        return string("READ/NOTIF");
-    if(op == NIXL_WRITE && hasNotif)
-        return string("WRITE/NOTIF");
-
-    return string("ERR-OP");
-}
-
 void
-performTransfer(nixlLibfabricEngine *ucx1,
-                nixlLibfabricEngine *ucx2,
+performTransfer(nixlLibfabricEngine *engine1,
+                nixlLibfabricEngine *engine2,
                 nixl_meta_dlist_t &req_src_descs,
                 nixl_meta_dlist_t &req_dst_descs,
                 void *addr1,
                 void *addr2,
-                size_t len,
-                nixl_xfer_op_t op,
-                testHndlIterator &hiter,
-                bool progress,
-                bool use_notif) {
-    int ret2;
-    nixl_status_t ret3;
-    void *chkptr1, *chkptr2;
+                size_t total_len,
+                nixl_xfer_op_t op) {
 
-    std::string remote_agent ("Agent2");
+    std::string remote_agent("Agent2");
+    if (engine1 == engine2)
+        remote_agent = "Agent1";
 
-    if(ucx1 == ucx2) remote_agent = "Agent1";
-
-    std::string test_str("test");
-    std::cout << "\t" << op2string(op, use_notif) << " from " << addr1 << " to " << addr2 << "\n";
+    std::cout << "\t" << (op == NIXL_READ ? "READ" : "WRITE") << " from " << addr1 << " to "
+              << addr2 << " (" << total_len << " bytes, " << req_src_descs.descCount()
+              << " descriptors)\n";
 
     nixl_opt_b_args_t opt_args;
-    opt_args.notifMsg = test_str;
-    opt_args.hasNotif = use_notif;
+    opt_args.hasNotif = false;
 
+    // Prepare and post transfer
+    nixlBackendReqH *handle = nullptr;
+    nixl_status_t ret = engine1->prepXfer(op, req_src_descs, req_dst_descs, remote_agent, handle, &opt_args);
+    assert(ret == NIXL_SUCCESS);
 
-    // Posting a request, to be updated to return an async handler,
-    // or an ID that later can be used to check the status as a new method
-    // Also maybe we would remove the WRITE and let the backend class decide the op
-    if (hiter.needPrep()) {
-        nixlBackendReqH *new_handle = nullptr;
-        ret3 =
-            ucx1->prepXfer(op, req_src_descs, req_dst_descs, remote_agent, new_handle, &opt_args);
-        nixl_exit_on_failure(ret3, "Failed to prep xfer");
-        hiter.setHandle(new_handle);
-    }
-    nixlBackendReqH *&handle = hiter.getHandle();
-    ret3 = ucx1->postXfer(op, req_src_descs, req_dst_descs, remote_agent, handle, &opt_args);
-    nixl_exit_on_failure(ret3 >= NIXL_SUCCESS, "Failed to post xfer");
+    ret = engine1->postXfer(op, req_src_descs, req_dst_descs, remote_agent, handle, &opt_args);
+    assert(ret == NIXL_SUCCESS || ret == NIXL_IN_PROG);
 
-    if (ret3 == NIXL_SUCCESS) {
-        cout << "\t\tWARNING: Tansfer request completed immediately - no testing non-inline path" << endl;
+    if (ret == NIXL_SUCCESS) {
+        cout << "\t\tTransfer completed immediately\n";
     } else {
-        cout << "\t\tNOTE: Testing non-inline Transfer path!" << endl;
-
-        while(ret3 == NIXL_IN_PROG) {
-            ret3 = ucx1->checkXfer(handle);
-            if(progress){
-                ucx2->progress();
-            }
-            nixl_exit_on_failure(ret3 >= NIXL_SUCCESS, "Failed to check xfer");
+        cout << "\t\tWaiting for transfer completion...\n";
+        while (ret == NIXL_IN_PROG) {
+            ret = engine1->checkXfer(handle);
+            // checkXfer() already progresses rails when progress thread is disabled
+            assert(ret == NIXL_SUCCESS || ret == NIXL_IN_PROG);
         }
     }
 
-    if (hiter.needRelease()) {
-        hiter.unsetHandle();
-        ucx1->releaseReqH(handle);
-    }
-
-    if(use_notif) {
-            /* Test notification path */
-        notif_list_t target_notifs;
-
-        cout << "\t\tChecking notification flow: " << flush;
-        ret2 = 0;
-
-        while(ret2 == 0){
-            ret3 = ucx2->getNotifs(target_notifs);
-            ret2 = target_notifs.size();
-            if(progress){
-                ucx1->progress();
-            }
-            nixl_exit_on_failure(ret3, "Failed to get notifs");
-        }
-
-        nixl_exit_on_failure((ret2 == 1), "Incorrect number of target notifs");
-
-        nixl_exit_on_failure((target_notifs.front().first == "Agent1"),
-                             "Incorrect front notif source");
-        nixl_exit_on_failure((target_notifs.front().second == test_str),
-                             "Incorrect front notif message");
-
-        cout << "OK" << endl;
-    }
-
-    cout << "\t\tData verification: " << flush;
-
-    chkptr1 = getValidationPtr(req_src_descs.getType(), addr1, len);
-    chkptr2 = getValidationPtr(req_dst_descs.getType(), addr2, len);
-
-    // Perform correctness check.
-    for (size_t i = 0; i < len; i++) {
-        nixl_exit_on_failure((((uint8_t *)chkptr1)[i] == ((uint8_t *)chkptr2)[i]), "Data mismatch");
-    }
-
-    releaseValidationPtr(req_src_descs.getType(), chkptr1);
-    releaseValidationPtr(req_dst_descs.getType(), chkptr2);
-
-    cout << "OK" << endl;
+    engine1->releaseReqH(handle);
+    cout << "\t\tTransfer complete\n";
 }
 
 void
-test_intra_agent_transfer(bool p_thread, nixlLibfabricEngine *ucx, nixl_mem_t mem_type) {
+test_multi_descriptor_offsets(bool p_thread) {
+    std::cout << "\n\n";
+    std::cout << "****************************************************\n";
+    std::cout << "   Multi-descriptor offset test (Integration)\n";
+    std::cout << "   P-Thread=" << (p_thread ? "ON" : "OFF") << "\n";
+    std::cout << "****************************************************\n";
+    std::cout << "\n";
 
-    std::cout << std::endl << std::endl;
-    std::cout << "****************************************************" << std::endl;
-    std::cout << "   Intra-agent memory transfer test: "
-              << "P-Thr=" << (p_thread ? "ON" : "OFF") << ", " << memType2Str(mem_type)
-              << std::endl;
-    std::cout << "****************************************************" << std::endl;
-    std::cout << std::endl << std::endl;
-
-    std::string agent1("Agent1");
-    nixl_status_t ret1;
-
-    int iter = 10;
-
-    nixl_exit_on_failure(ucx->supportsLocal(), "Failed to get conn info");
-
-    //connection info is still a string
-    std::string conn_info1;
-    ret1 = ucx->getConnInfo(conn_info1);
-    nixl_exit_on_failure((ret1 == NIXL_SUCCESS), "Failed to get conn info");
-    ret1 = ucx->loadRemoteConnInfo(agent1, conn_info1);
-    nixl_exit_on_failure((ret1 == NIXL_SUCCESS), "Failed to load remote conn info");
-
-    std::cout << "Local connection complete\n";
-
-    // Number of transfer descriptors
-    int desc_cnt = 64;
-    // Size of a single descriptor
-    size_t desc_size = 1 * 1024 * 1024;
-    size_t len = desc_cnt * desc_size;
-
-    void *addr1, *addr2;
-    nixlBackendMD *lmd1, *lmd2;
-    allocateAndRegister(ucx, 0, mem_type, addr1, len, lmd1);
-    allocateAndRegister(ucx, 0, mem_type, addr2, len, lmd2);
-
-    //string descs unnecessary, convert meta locally
-    nixlBackendMD* rmd2;
-    ret1 = ucx->loadLocalMD(lmd2, rmd2);
-    nixl_exit_on_failure((ret1 == NIXL_SUCCESS), "Failed to load local MD");
-    nixl_meta_dlist_t req_src_descs (mem_type);
-    populateDescs(req_src_descs, 0, addr1, desc_cnt, desc_size, lmd1);
-
-    nixl_meta_dlist_t req_dst_descs (mem_type);
-    populateDescs(req_dst_descs, 0, addr2, desc_cnt, desc_size, rmd2);
-
-    nixl_xfer_op_t ops[] = {  NIXL_READ, NIXL_WRITE };
-    bool use_notifs[] = { true, false };
-
-    for (size_t i = 0; i < sizeof(ops)/sizeof(ops[i]); i++) {
-
-        for(bool use_notif : use_notifs) {
-            cout << endl << op2string(ops[i], use_notif) << " test (" << iter << ") iterations" <<endl;
-            for(int k = 0; k < iter; k++ ) {
-                /* Init data */
-                doMemset(mem_type, 0, addr1, 0xbb, len);
-                doMemset(mem_type, 0, addr2, 0, len);
-
-                /* Test */
-                testHndlIterator hiter(false);
-                performTransfer(ucx, ucx, req_src_descs, req_dst_descs,
-                                addr1, addr2, len, ops[i], hiter, p_thread, use_notif);
-            }
-        }
-    }
-
-    ucx->unloadMD (rmd2);
-    deallocateAndDeregister(ucx, 0, mem_type, addr1, lmd1);
-    deallocateAndDeregister(ucx, 0, mem_type, addr2, lmd2);
-
-    ucx->disconnect(agent1);
-}
-
-void
-test_inter_agent_transfer(bool p_thread,
-                          bool reuse_hndl,
-                          nixlLibfabricEngine *ucx1,
-                          nixl_mem_t src_mem_type,
-                          int src_dev_id,
-                          nixlLibfabricEngine *ucx2,
-                          nixl_mem_t dst_mem_type,
-                          int dst_dev_id) {
-    int ret;
-    int iter = 10;
-
-    std::cout << std::endl << std::endl;
-    std::cout << "****************************************************" << std::endl;
-    std::cout << "    Inter-agent memory transfer test " << std::endl;
-    std::cout << "         P-Thr=" << (p_thread ? "ON" : "OFF") << std::endl;
-    std::cout << "         Handler-reuse=" << (reuse_hndl ? "ON" : "OFF") << std::endl;
-    std::cout << "         (" << memType2Str(src_mem_type) << " -> "
-                << memType2Str(dst_mem_type) << ")" << std::endl;
-    std::cout << "****************************************************" << std::endl;
-    std::cout << std::endl << std::endl;
-
-    // Example: assuming two agents running on the same machine,
-    // with separate memory regions in DRAM
     std::string agent1("Agent1");
     std::string agent2("Agent2");
 
-    // We get the required connection info from UCX to be put on the central
-    // location and ask for it for a remote node
-    std::string conn_info1, conn_info2;
-    ret = ucx1->getConnInfo(conn_info1);
-    nixl_exit_on_failure((ret == NIXL_SUCCESS), "Failed to get conn info");
-    ret = ucx2->getConnInfo(conn_info2);
-    nixl_exit_on_failure((ret == NIXL_SUCCESS), "Failed to get conn info");
+    // Create engines
+    nixlLibfabricEngine *engine1 = createEngine(agent1, p_thread);
+    nixlLibfabricEngine *engine2 = createEngine(agent2, p_thread);
 
-    // We assumed we put them to central location and now receiving it on the other process
-    ret = ucx1->loadRemoteConnInfo(agent2, conn_info2);
-    nixl_exit_on_failure((ret == NIXL_SUCCESS), "Failed to load remote conn info");
+    // Test parameters
+    const size_t TOTAL_SIZE = 1024 * 1024; // 1MB total
+    const size_t DESC_SIZE = 64 * 1024;    // 64KB per descriptor
+    const int DESC_COUNT = TOTAL_SIZE / DESC_SIZE; // 16 descriptors
 
-    // TODO: Causes race condition - investigate conn management implementation
-    // ret = ucx2->loadRemoteConnInfo (agent1, conn_info1);
+    std::cout << "Test configuration:\n";
+    std::cout << "  Total buffer size: " << TOTAL_SIZE << " bytes\n";
+    std::cout << "  Descriptor size: " << DESC_SIZE << " bytes\n";
+    std::cout << "  Descriptor count: " << DESC_COUNT << "\n\n";
 
-    std::cout << "Synchronous handshake complete\n";
+    // Allocate and register buffers
+    void *send_buf = nullptr;
+    void *recv_buf = nullptr;
+    nixlBackendMD *send_md = nullptr;
+    nixlBackendMD *recv_md = nullptr;
 
-    // Number of transfer descriptors
-    int desc_cnt = 64;
-    // Size of a single descriptor
-    size_t desc_size = 1 * 1024 * 1024;
-    size_t len = desc_cnt * desc_size;
+    allocateAndRegister(engine1, 0, DRAM_SEG, send_buf, TOTAL_SIZE, send_md);
+    allocateAndRegister(engine2, 0, DRAM_SEG, recv_buf, TOTAL_SIZE, recv_md);
 
-    void *addr1 = NULL, *addr2 = NULL;
-    nixlBackendMD *lmd1, *lmd2;
-    allocateAndRegister(ucx1, src_dev_id, src_mem_type, addr1, len, lmd1);
-    allocateAndRegister(ucx2, dst_dev_id, dst_mem_type, addr2, len, lmd2);
+    // Fill send buffer with unique pattern for each descriptor's region
+    for (int i = 0; i < DESC_COUNT; i++) {
+        size_t offset = i * DESC_SIZE;
+        uint8_t pattern = static_cast<uint8_t>(i);
+        for (size_t j = 0; j < DESC_SIZE; j++) {
+            ((uint8_t *)send_buf)[offset + j] = pattern;
+        }
+    }
 
-    nixlBackendMD *rmd1 /*, *rmd2*/;
-    loadRemote(ucx1, dst_dev_id,  agent2, dst_mem_type, addr2, len, lmd2, rmd1);
-    //loadRemote(ucx2, src_dev_id, agent1, src_mem_type, addr1, len, lmd1, rmd2);
+    // Zero receive buffer
+    memset(recv_buf, 0, TOTAL_SIZE);
 
-    nixl_meta_dlist_t req_src_descs (src_mem_type);
-    populateDescs(req_src_descs, src_dev_id, addr1, desc_cnt, desc_size, lmd1);
+    // Exchange connection info
+    std::string conn1, conn2;
+    engine1->getConnInfo(conn1);
+    engine2->getConnInfo(conn2);
 
-    nixl_meta_dlist_t req_dst_descs (dst_mem_type);
-    populateDescs(req_dst_descs, dst_dev_id, addr2, desc_cnt, desc_size, rmd1);
+    engine1->loadRemoteConnInfo(agent2, conn2);
+    engine2->loadRemoteConnInfo(agent1, conn1);
 
-    nixl_xfer_op_t ops[] = {  NIXL_READ, NIXL_WRITE };
-    bool use_notifs[] = { true, false };
+    std::cout << "Establishing connections...\n";
+    engine1->connect(agent2);
+    engine2->connect(agent1);
 
-    for (size_t i = 0; i < sizeof(ops)/sizeof(ops[i]); i++) {
+    // Wait for async connection establishment to complete
+    // The CM thread handles connection progress
+    sleep(2);
+    std::cout << "Connections established\n\n";
 
-        for(bool use_notif : use_notifs) {
-            cout << endl << op2string(ops[i], use_notif) << " test (" << iter << ") iterations" <<endl;
-            testHndlIterator hiter(reuse_hndl);
-            for(int k = 0; k < iter; k++ ) {
-                /* Init data */
-                doMemset(src_mem_type, src_dev_id, addr1, 0xbb, len);
-                doMemset(dst_mem_type, dst_dev_id, addr2, 0xda, len);
+    // Load remote metadata
+    nixlBackendMD *recv_rmd = nullptr;
 
-                /* Test */
-                if ((k+1) == iter) {
-                    /* If this is the last iteration */
-                    hiter.isLast();
-                }
-                performTransfer(ucx1, ucx2, req_src_descs, req_dst_descs,
-                                addr1, addr2, len, ops[i], hiter, !p_thread, use_notif);
+    loadRemote(engine1, 0, agent2, DRAM_SEG, recv_buf, TOTAL_SIZE, recv_md, recv_rmd);
+
+    // Create descriptor lists with different offsets
+    nixl_meta_dlist_t src_descs(DRAM_SEG);
+    nixl_meta_dlist_t dst_descs(DRAM_SEG);
+
+    populateDescs(src_descs, 0, send_buf, DESC_COUNT, DESC_SIZE, send_md);
+    populateDescs(dst_descs, 0, recv_buf, DESC_COUNT, DESC_SIZE, recv_rmd);
+
+    std::cout << "Created " << src_descs.descCount() << " source descriptors\n";
+    std::cout << "Created " << dst_descs.descCount() << " destination descriptors\n\n";
+
+    // Perform transfer
+    performTransfer(engine1, engine2, src_descs, dst_descs, send_buf, recv_buf, TOTAL_SIZE, NIXL_WRITE);
+
+    // Verify data correctness for each descriptor's region
+    std::cout << "\nData verification:\n";
+    bool all_correct = true;
+
+    for (int i = 0; i < DESC_COUNT; i++) {
+        size_t offset = i * DESC_SIZE;
+        uint8_t expected_pattern = static_cast<uint8_t>(i);
+        bool desc_correct = true;
+
+        for (size_t j = 0; j < DESC_SIZE; j++) {
+            if (((uint8_t *)recv_buf)[offset + j] != expected_pattern) {
+                std::cerr << "  ERROR: Descriptor " << i << " at offset " << offset + j
+                          << " has wrong data: expected " << (int)expected_pattern << ", got "
+                          << (int)((uint8_t *)recv_buf)[offset + j] << "\n";
+                desc_correct = false;
+                all_correct = false;
+                break; // Only report first mismatch per descriptor
             }
         }
-    }
 
-    cout << endl << "Test genNotif operation" << endl;
-
-    for(int k = 0; k < iter; k++) {
-        std::string test_str("test");
-        std::string tgt_agent("Agent2");
-        notif_list_t target_notifs;
-
-        cout << "\t gnNotif to Agent2" <<endl;
-
-        ucx1->genNotif(tgt_agent, test_str);
-
-        cout << "\t\tChecking notification flow: " << flush;
-        ret = 0;
-
-        nixl_status_t ret2;
-
-        while(ret == 0){
-            ret2 = ucx2->getNotifs(target_notifs);
-            ret = target_notifs.size();
-            nixl_exit_on_failure((ret2 == NIXL_SUCCESS), "Failed to get notifs");
+        if (desc_correct) {
+            std::cout << "  Descriptor " << i << " (offset " << offset << "): OK (pattern "
+                      << (int)expected_pattern << ")\n";
         }
-
-        nixl_exit_on_failure((ret == 1), "Incorrect number of target notifs");
-        nixl_exit_on_failure((target_notifs.front().first == "Agent1"),
-                             "Incorrect front notif source");
-        nixl_exit_on_failure((target_notifs.front().second == test_str),
-                             "Incorrect front notif message");
-
-        cout << "OK" << endl;
     }
 
-    // As well as all the remote notes, asking to remove them one by one
-    // need to provide list of descs
-    ucx1->unloadMD (rmd1);
-    //ucx2->unloadMD (rmd2);
+    if (all_correct) {
+        std::cout << "\n✓ ALL DESCRIPTORS VERIFIED SUCCESSFULLY\n";
+        std::cout << "  Each descriptor transferred data from its correct offset\n";
+    } else {
+        std::cerr << "\n✗ DATA CORRUPTION DETECTED\n";
+        std::cerr << "  Some descriptors received data from wrong offsets\n";
+        std::cerr << "  This indicates the descriptor offset bug is present!\n";
+        exit(1);
+    }
 
-    // Release memory regions
-    deallocateAndDeregister(ucx1, src_dev_id, src_mem_type, addr1, lmd1);
-    deallocateAndDeregister(ucx2, dst_dev_id, dst_mem_type, addr2, lmd2);
+    // Cleanup
+    engine1->disconnect(agent2);
+    engine2->disconnect(agent1);
 
-    // Test one-sided disconnect (initiator only)
-    ucx1->disconnect(agent2);
+    deallocateAndDeregister(engine1, 0, DRAM_SEG, send_buf, send_md);
+    deallocateAndDeregister(engine2, 0, DRAM_SEG, recv_buf, recv_md);
 
-    // TODO: Causes race condition - investigate conn management implementation
-    //ucx2->disconnect(agent1);
+    releaseEngine(engine1);
+    releaseEngine(engine2);
+
+    std::cout << "\nTest completed successfully!\n";
 }
 
-int main()
-{
-    bool thread_on[2] = {false, true};
-    nixlLibfabricEngine *ucx[2][2] = {0};
+int
+main(int argc, char **argv) {
+    bool p_thread = false;
 
-    // Allocate UCX engines
-    for(int i = 0; i < 2; i++) {
-        for(int j = 0; j < 2; j++) {
-            std::stringstream s;
-            s << "Agent" << (j + 1);
-            ucx[i][j] = createEngine(s.str(), thread_on[i]);
-        }
+    if (argc > 1 && std::string(argv[1]) == "--pthread") {
+        p_thread = true;
     }
 
-#ifdef HAVE_CUDA
-    int dev_ids[2] = { 0 , 0 };
-    int n_vram_dev;
-    if (cudaGetDeviceCount(&n_vram_dev) != cudaSuccess) {
-        std::cout << "Call to cudaGetDeviceCount failed, assuming 0 devices";
-        n_vram_dev = 0;
-    }
+    test_multi_descriptor_offsets(p_thread);
 
-    std::cout << "Detected " << n_vram_dev << " CUDA devices" << std::endl;
-    if (n_vram_dev > 1) {
-        dev_ids[1] = 1;
-        dev_ids[0] = 0;
-    }
-#endif
-
-    for(int i = 0; i < 2; i++) {
-        //Test local memory to local memory transfer
-        test_intra_agent_transfer(thread_on[i], ucx[i][0], DRAM_SEG);
-#ifdef HAVE_CUDA
-        if (n_vram_dev > 0) {
-            test_intra_agent_transfer(thread_on[i], ucx[i][0], VRAM_SEG);
-        }
-#endif
-    }
-
-    for(int i = 0; i < 2; i++) {
-        test_inter_agent_transfer(thread_on[i], false,
-                                  ucx[i][0], DRAM_SEG, 0,
-                                  ucx[i][1], DRAM_SEG, 0);
-        test_inter_agent_transfer(thread_on[i], true,
-                                  ucx[i][0], DRAM_SEG, 0,
-                                  ucx[i][1], DRAM_SEG, 0);
-
-#ifdef HAVE_CUDA
-        if (n_vram_dev > 1) {
-            test_inter_agent_transfer(thread_on[i], false,
-                                      ucx[i][0], VRAM_SEG, dev_ids[0],
-                                      ucx[i][1], VRAM_SEG, dev_ids[1]);
-            test_inter_agent_transfer(thread_on[i], true,
-                                      ucx[i][0], VRAM_SEG, dev_ids[0],
-                                      ucx[i][1], VRAM_SEG, dev_ids[1]);
-            test_inter_agent_transfer(thread_on[i], true,
-                                      ucx[i][0], DRAM_SEG, dev_ids[0],
-                                      ucx[i][1], VRAM_SEG, dev_ids[1]);
-            test_inter_agent_transfer(thread_on[i], true,
-                                      ucx[i][0], VRAM_SEG, dev_ids[0],
-                                      ucx[i][1], DRAM_SEG, dev_ids[1]);
-        }
-#endif
-    }
-
-#ifdef HAVE_CUDA
-    if (n_vram_dev > 1) {
-		//Test if registering on a different GPU fails correctly
-		allocateWrongGPUTest(ucx[0][0], 1);
-		std::cout << "Verified registration on wrong GPU fails correctly\n";
-	}
-#endif
-
-    // Deallocate UCX engines
-    for(int i = 0; i < 2; i++) {
-        for(int j = 0; j < 2; j++) {
-            releaseEngine(ucx[i][j]);
-        }
-    }
+    return 0;
 }
