@@ -54,3 +54,8 @@ gusli_lib_found = cc.find_library(gusli_lib_file, dirs: [gusli_lib_path], requir
 if gusli_lib_found.found()
     subdir('gusli')
 endif
+
+# Libfabric plugin tests
+if libfabric_dep.found()
+    subdir('libfabric')
+endif

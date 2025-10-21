@@ -18,7 +18,7 @@
 #include <sstream>
 #include <string>
 
-#include "ucx_backend.h"
+#include "libfabric_backend.h"
 #include "test_utils.h"
 
 using namespace std;
@@ -107,7 +107,7 @@ public:
     }
 };
 
-nixlUcxEngine *
+nixlLibfabricEngine *
 createEngine(std::string name, bool p_thread) {
     nixlBackendInitParams init;
     nixl_b_params_t       custom_params;
@@ -116,16 +116,16 @@ createEngine(std::string name, bool p_thread) {
     init.pthrDelay    = 100;
     init.localAgent   = name;
     init.customParams = &custom_params;
-    init.type         = "UCX";
+    init.type         = "LIBFABRIC";
 
-    auto ucx = nixlUcxEngine::create(init).release();
+    auto ucx = nixlLibfabricEngine::create(init).release();
     nixl_exit_on_failure(!ucx->getInitErr(), "Failed to initialize worker1");
 
     return ucx;
 }
 
 void
-releaseEngine(nixlUcxEngine *ucx) {
+releaseEngine(nixlLibfabricEngine *ucx) {
     delete ucx;
 }
 
@@ -275,7 +275,7 @@ void *releaseValidationPtr(nixl_mem_t mem_type, void *addr)
 }
 
 void
-allocateWrongGPUTest(nixlUcxEngine *ucx, int dev_id) {
+allocateWrongGPUTest(nixlLibfabricEngine *ucx, int dev_id) {
     nixlBlobDesc desc = {0};
     nixlBackendMD* md;
     void* buf;
@@ -293,7 +293,7 @@ allocateWrongGPUTest(nixlUcxEngine *ucx, int dev_id) {
 }
 
 void
-allocateAndRegister(nixlUcxEngine *ucx,
+allocateAndRegister(nixlLibfabricEngine *ucx,
                     int dev_id,
                     nixl_mem_t mem_type,
                     void *&addr,
@@ -313,7 +313,7 @@ allocateAndRegister(nixlUcxEngine *ucx,
 }
 
 void
-deallocateAndDeregister(nixlUcxEngine *ucx,
+deallocateAndDeregister(nixlLibfabricEngine *ucx,
                         int dev_id,
                         nixl_mem_t mem_type,
                         void *&addr,
@@ -323,7 +323,7 @@ deallocateAndDeregister(nixlUcxEngine *ucx,
 }
 
 void
-loadRemote(nixlUcxEngine *ucx,
+loadRemote(nixlLibfabricEngine *ucx,
            int dev_id,
            std::string agent,
            nixl_mem_t mem_type,
@@ -371,8 +371,8 @@ static string op2string(nixl_xfer_op_t op, bool hasNotif)
 }
 
 void
-performTransfer(nixlUcxEngine *ucx1,
-                nixlUcxEngine *ucx2,
+performTransfer(nixlLibfabricEngine *ucx1,
+                nixlLibfabricEngine *ucx2,
                 nixl_meta_dlist_t &req_src_descs,
                 nixl_meta_dlist_t &req_dst_descs,
                 void *addr1,
@@ -474,7 +474,7 @@ performTransfer(nixlUcxEngine *ucx1,
 }
 
 void
-test_intra_agent_transfer(bool p_thread, nixlUcxEngine *ucx, nixl_mem_t mem_type) {
+test_intra_agent_transfer(bool p_thread, nixlLibfabricEngine *ucx, nixl_mem_t mem_type) {
 
     std::cout << std::endl << std::endl;
     std::cout << "****************************************************" << std::endl;
@@ -551,10 +551,10 @@ test_intra_agent_transfer(bool p_thread, nixlUcxEngine *ucx, nixl_mem_t mem_type
 void
 test_inter_agent_transfer(bool p_thread,
                           bool reuse_hndl,
-                          nixlUcxEngine *ucx1,
+                          nixlLibfabricEngine *ucx1,
                           nixl_mem_t src_mem_type,
                           int src_dev_id,
-                          nixlUcxEngine *ucx2,
+                          nixlLibfabricEngine *ucx2,
                           nixl_mem_t dst_mem_type,
                           int dst_dev_id) {
     int ret;
@@ -687,7 +687,7 @@ test_inter_agent_transfer(bool p_thread,
 int main()
 {
     bool thread_on[2] = {false, true};
-    nixlUcxEngine *ucx[2][2] = {0};
+    nixlLibfabricEngine *ucx[2][2] = {0};
 
     // Allocate UCX engines
     for(int i = 0; i < 2; i++) {

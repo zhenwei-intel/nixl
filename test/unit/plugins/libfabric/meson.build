@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+# SPDX-FileCopyrightText: Copyright (c) 2025 Intel Corporation. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,26 +14,56 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ucx_backend_dep = declare_dependency(link_with: ucx_backend_lib, include_directories: [nixl_inc_dirs, '../../../../src/plugins/ucx'])
+
+# Libfabric plugin integration tests
+
+libfabric_backend_dep = declare_dependency(
+    link_with: libfabric_backend_lib,
+    include_directories: [nixl_inc_dirs, '../../../../src/plugins/libfabric']
+)
+
+# Collect compile flags
+compile_flags = []
+additional_deps = []
 
 if cuda_dep.found()
-    cuda_dependencies = [cuda_dep]
-    cpp_args = '-DHAVE_CUDA'
-else
-    cuda_dependencies = []
-    cpp_args = '-UHAVE_CUDA'
+    additional_deps += [cuda_dep]
+    compile_flags += ['-DHAVE_CUDA']
 endif
 
-ucx_backend_test = executable('ucx_backend_test',
-        'ucx_backend_test.cpp',
-        dependencies: [nixl_dep, nixl_infra, nixl_common_deps, ucx_backend_dep, ucx_dep, thread_dep] + cuda_dependencies + nixl_test_utils_dep,
-        include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/ucx'],
-        cpp_args : cpp_args,
-        install: true)
+# if synapseai_dep.found()
+#     additional_deps += [synapseai_dep]
+#     compile_flags += ['-DHAVE_SYNAPSEAI']
+# endif
 
-ucx_backend_multi = executable('ucx_backend_multi',
-           'ucx_backend_multi.cpp',
-           dependencies: [nixl_dep, nixl_infra, nixl_common_deps, ucx_backend_dep, ucx_dep, thread_dep] + cuda_dependencies + nixl_test_utils_dep,
-           include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/ucx'],
-           cpp_args : cpp_args,
-           install: true)
+libfabric_test_deps = [
+    nixl_dep,
+    nixl_infra,
+    nixl_common_deps,
+    libfabric_utils_dep,
+    libfabric_backend_dep,
+    libfabric_dep,
+    thread_dep,
+] + additional_deps
+
+# Integration test: Multi-descriptor offset handling with actual backend
+test_backend_integration = executable(
+    'test_libfabric_backend_test',
+    'libfabric_backend_test.cpp',
+    dependencies: libfabric_test_deps,
+    cpp_args: compile_flags,
+    include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
+    install: false,
+)
+
+test('libfabric_backend_test',
+     test_backend_integration,
+     suite: ['unit', 'plugins', 'libfabric', 'integration'],
+     timeout: 120,
+)
+
+# Future integration tests can be added here following the same pattern:
+# - Multi-GPU transfers
+# - Different memory types (DRAM, VRAM)
+# - Notification flow
+# - Connection management
