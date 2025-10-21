@@ -40,6 +40,7 @@ libfabric_test_deps = [
     nixl_dep,
     nixl_infra,
     nixl_common_deps,
+    nixl_test_utils_dep,
     libfabric_utils_dep,
     libfabric_backend_dep,
     libfabric_dep,
