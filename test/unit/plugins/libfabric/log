@@ -1,0 +1,56 @@
+root@dual3090 /d/z/n/build.fabric (test_libfabric)# test/unit/plugins/libfabric/test_libfabric_backend_test
+hwloc/linux: Ignoring PCI device with non-16bit domain.
+Pass --enable-32bits-pci-domain to configure to support such devices
+(warning: it would break the library ABI, don't enable unless really needed).
+W1022 02:01:05.202003   72319 libfabric_rail.cpp:522] fi_setopt FI_OPT_SHARED_MEMORY_PERMITTED failed for rail 0: Protocol not available - continuing anyway
+W1022 02:01:05.207377   72319 libfabric_rail.cpp:522] fi_setopt FI_OPT_SHARED_MEMORY_PERMITTED failed for rail 0: Protocol not available - continuing anyway
+W1022 02:01:05.223178   72319 libfabric_rail.cpp:522] fi_setopt FI_OPT_SHARED_MEMORY_PERMITTED failed for rail 0: Protocol not available - continuing anyway
+W1022 02:01:05.228883   72319 libfabric_rail.cpp:522] fi_setopt FI_OPT_SHARED_MEMORY_PERMITTED failed for rail 0: Protocol not available - continuing anyway
+W1022 02:01:05.242640   72319 libfabric_rail.cpp:522] fi_setopt FI_OPT_SHARED_MEMORY_PERMITTED failed for rail 0: Protocol not available - continuing anyway
+W1022 02:01:05.247828   72319 libfabric_rail.cpp:522] fi_setopt FI_OPT_SHARED_MEMORY_PERMITTED failed for rail 0: Protocol not available - continuing anyway
+W1022 02:01:05.262431   72319 libfabric_rail.cpp:522] fi_setopt FI_OPT_SHARED_MEMORY_PERMITTED failed for rail 0: Protocol not available - continuing anyway
+W1022 02:01:05.267906   72319 libfabric_rail.cpp:522] fi_setopt FI_OPT_SHARED_MEMORY_PERMITTED failed for rail 0: Protocol not available - continuing anyway
+Detected 2 CUDA devices
+
+****************************************************
+   Intra-agent memory transfer test: P-Thr=OFF, DRAM
+****************************************************
+
+
+Local connection complete
+
+READ/NOTIF test (1) iterations
+        READ/NOTIF from 0x7aabf9fff010 to 0x7aabf5ffe010
+                NOTE: Testing non-inline Transfer path!
+                Data verification: OK
+
+READ test (1) iterations
+        READ from 0x7aabf9fff010 to 0x7aabf5ffe010
+                NOTE: Testing non-inline Transfer path!
+                Data verification: OK
+
+WRITE/NOTIF test (1) iterations
+        WRITE/NOTIF from 0x7aabf9fff010 to 0x7aabf5ffe010
+                NOTE: Testing non-inline Transfer path!
+                Data verification: OK
+
+WRITE test (1) iterations
+        WRITE from 0x7aabf9fff010 to 0x7aabf5ffe010
+                NOTE: Testing non-inline Transfer path!
+                Data verification: OK
+
+
+****************************************************
+   Intra-agent memory transfer test: P-Thr=OFF, VRAM
+****************************************************
+
+
+Local connection complete
+CUDA addr: 0x7aabda000000 dev=0 ctx=0x590a58d3e370
+W1022 02:01:07.017717   72319 libfabric_topology.cpp:143] No EFA devices found for GPU 0, returning all devices
+CUDA addr: 0x7aabd6000000 dev=0 ctx=0x590a58d3e370
+W1022 02:01:07.017825   72319 libfabric_topology.cpp:143] No EFA devices found for GPU 0, returning all devices
+
+READ/NOTIF test (1) iterations
+        READ/NOTIF from 0x7aabda000000 to 0x7aabd6000000
+fish: Job 2, 'test/unit/plugins/libfabric/t...' terminated by signal SIGSEGV (Address boundary error)
