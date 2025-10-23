@@ -48,14 +48,14 @@ libfabric_test_deps = [
 ] + additional_deps
 
 # Integration test: Multi-descriptor offset handling with actual backend
-# test_backend_integration = executable(
-#     'test_libfabric_backend_test',
-#     'libfabric_backend_test_v2.cpp',
-#     dependencies: libfabric_test_deps,
-#     cpp_args: compile_flags,
-#     include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
-#     install: false,
-# )
+test_backend_integration = executable(
+    'test_libfabric_backend_test',
+    'libfabric_backend_test.cpp',
+    dependencies: libfabric_test_deps,
+    cpp_args: compile_flags,
+    include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
+    install: false,
+)
 
 test_backend_integration_cuda = executable(
     'test_libfabric_backend_test_cuda',
