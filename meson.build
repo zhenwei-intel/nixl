@@ -136,21 +136,23 @@ else
     warning('SynapseAI not found. Habana Gaudi device support will be disabled.')
 endif
 
-sycl_root = '/opt/intel/oneapi/compiler/2025.1'
-sycl_inc = include_directories(join_paths(sycl_root, 'include'))
 
-sycl_libdir = join_paths(sycl_root, 'lib')
+sycl_dep = dependency('sycl_dep', required : false)
+# sycl_root = '/opt/intel/oneapi/compiler/2025.1'
+# sycl_inc = include_directories(join_paths(sycl_root, 'include'))
 
-sycl_dep = declare_dependency(
-  include_directories : sycl_inc,
-  link_args : ['-L' + sycl_libdir, '-lsycl']
-)
+# sycl_libdir = join_paths(sycl_root, 'lib')
 
-if sycl_dep.found()
-    message('Found SYCL support for XPU devices')
-else
-    error('Cannot found SYCL support for XPU devices')
-endif
+# sycl_dep = declare_dependency(
+#   include_directories : sycl_inc,
+#   link_args : ['-L' + sycl_libdir, '-lsycl']
+# )
+
+# if sycl_dep.found()
+#     message('Found SYCL support for XPU devices')
+# else
+#     error('Cannot found SYCL support for XPU devices')
+# endif
 
 # DOCA
 doca_gpunetio_dep = dependency('doca-gpunetio', required : false)

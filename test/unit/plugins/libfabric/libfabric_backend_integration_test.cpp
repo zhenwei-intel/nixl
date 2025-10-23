@@ -6,6 +6,10 @@
  * Integration test for libfabric backend descriptor offset handling
  * Tests the actual backend with multiple descriptors pointing to different offsets
  * within the same registered memory region.
+
+
+FI_PROVIDER=verbs ./test/unit/plugins/libfabric/test_libfabric_backend_integration --pthread
+
  */
 
 #include <iostream>
