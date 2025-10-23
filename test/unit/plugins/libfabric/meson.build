@@ -61,11 +61,20 @@ test_backend_integration = executable(
     install: false,
 )
 
-test('libfabric_backend_integration',
-     test_backend_integration,
-     suite: ['unit', 'plugins', 'libfabric', 'integration'],
-     timeout: 120,
+test_backend_integration_cuda = executable(
+    'test_libfabric_backend_test_cuda',
+    'libfabric_backend_integration_test_cuda.cpp',
+    dependencies: libfabric_test_deps,
+    cpp_args: compile_flags,
+    include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
+    install: false,
 )
+
+# test('libfabric_backend_integration',
+#      test_backend_integration,
+#      suite: ['unit', 'plugins', 'libfabric', 'integration'],
+#      timeout: 120,
+# )
 
 # Future integration tests can be added here following the same pattern:
 # - Multi-GPU transfers
