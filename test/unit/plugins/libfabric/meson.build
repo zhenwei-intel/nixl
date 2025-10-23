@@ -41,6 +41,15 @@ if sycl_dep.found()
     compile_flags += ['-DHAVE_SYCL -I/usr/include -L/usr/lib -lze_loader']
 endif
 
+# xpu_inc = '/opt/intel/oneapi/compiler/latest/include/'
+# xpu_lib = '/opt/intel/oneapi/compiler/latest/lib/'
+# xpu_dep = declare_dependency(
+#     link_args : ['-L' + xpu_lib, '-lsycl'],
+#     include_directories : include_directories(xpu_inc))
+# xpu_dependencies = [xpu_dep]
+# cpp_args = '-DHAVE_XPU -fsycl -fsycl-targets=spir64 -Wno-deprecated-declarations'
+# compile_flags += ['-DHAVE_SYCL']
+
 libfabric_test_deps = [
     nixl_dep,
     nixl_infra,
@@ -61,14 +70,27 @@ test_backend_integration = executable(
     install: false,
 )
 
-test_backend_integration_xpu = executable(
-    'test_libfabric_backend_integration_xpu',
-    'libfabric_backend_integration_test_xpu.cpp',
-    dependencies: libfabric_test_deps,
-    cpp_args: compile_flags,
-    include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
-    install: false,
-)
+if sycl_dep.found()
+    test_backend_integration_xpu = executable(
+        'test_libfabric_backend_integration_xpu',
+        'libfabric_backend_integration_test_xpu.cpp',
+        dependencies: libfabric_test_deps,
+        cpp_args: compile_flags,
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
+        install: false,
+    )
+endif
+
+if cuda_dep.found()
+    test_backend_integration_cuda = executable(
+        'test_libfabric_backend_integration_cuda',
+        'libfabric_backend_integration_test_cuda.cpp',
+        dependencies: libfabric_test_deps,
+        cpp_args: compile_flags,
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
+        install: false,
+    )
+endif
 
 test_fi_info = executable(
     'test_fi_info',
@@ -102,6 +124,13 @@ test('libfabric_backend_integration',
      suite: ['unit', 'plugins', 'libfabric', 'integration'],
      timeout: 120,
 )
+
+
+# test('libfabric_backend_integration',
+#      test_backend_integration,
+#      suite: ['unit', 'plugins', 'libfabric', 'integration'],
+#      timeout: 120,
+# )
 
 # Future integration tests can be added here following the same pattern:
 # - Multi-GPU transfers

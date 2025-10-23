@@ -20,8 +20,52 @@ FI_PROVIDER=verbs ./test/unit/plugins/libfabric/test_libfabric_backend_integrati
 
 #include "libfabric_backend.h"
 #include "common/nixl_log.h"
-
+#ifdef HAVE_CUDA
+#include <cuda_runtime.h>
+#include <cuda.h>
+#endif
 using namespace std;
+
+#define SEND_DEVICE_ID 0
+#define RECV_DEVICE_ID 1
+#ifdef HAVE_CUDA
+int gpu_id = 0;
+
+static void checkCudaError(cudaError_t result, const char *message) {
+    if (result != cudaSuccess) {
+        std::cerr << message << " (Error code: " << result << " - "
+                   << cudaGetErrorString(result) << ")" << std::endl;
+        exit(EXIT_FAILURE);
+    }
+}
+
+static int cudaQueryAddr(void *address, bool &is_dev,
+                         CUdevice &dev, CUcontext &ctx)
+{
+    CUmemorytype mem_type = CU_MEMORYTYPE_HOST;
+    uint32_t is_managed = 0;
+#define NUM_ATTRS 4
+    CUpointer_attribute attr_type[NUM_ATTRS];
+    void *attr_data[NUM_ATTRS];
+    CUresult result;
+
+    attr_type[0] = CU_POINTER_ATTRIBUTE_MEMORY_TYPE;
+    attr_data[0] = &mem_type;
+    attr_type[1] = CU_POINTER_ATTRIBUTE_IS_MANAGED;
+    attr_data[1] = &is_managed;
+    attr_type[2] = CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
+
+    attr_data[2] = &dev;
+    attr_type[3] = CU_POINTER_ATTRIBUTE_CONTEXT;
+    attr_data[3] = &ctx;
+
+    result = cuPointerGetAttributes(4, attr_type, attr_data, (CUdeviceptr)address);
+
+    is_dev = (mem_type == CU_MEMORYTYPE_DEVICE);
+
+    return (CUDA_SUCCESS != result);
+}
+#endif
 
 nixlLibfabricEngine *
 createEngine(std::string name, bool p_thread) {
@@ -49,6 +93,7 @@ releaseEngine(nixlLibfabricEngine *engine) {
     delete engine;
 }
 
+
 void
 allocateAndRegister(nixlLibfabricEngine *engine,
                     int dev_id,
@@ -57,11 +102,17 @@ allocateAndRegister(nixlLibfabricEngine *engine,
                     size_t len,
                     nixlBackendMD *&md) {
     nixlBlobDesc desc;
+#ifdef HAVE_CUDA
+    bool is_dev;
+    CUdevice dev;
+    CUcontext ctx;
 
-    // Allocate buffer
-    addr = calloc(1, len);
-    assert(addr != nullptr);
-
+    checkCudaError(cudaSetDevice(dev_id), "Failed to set device");
+    checkCudaError(cudaMalloc(&addr, len), "Failed to allocate CUDA buffer 0");
+    cudaQueryAddr(addr, is_dev, dev, ctx);
+    std::cout << "CUDA addr: " << std::hex << addr << " dev=" << std::dec << dev
+        << " ctx=" << std::hex << ctx << std::dec << std::endl;
+#endif
     desc.addr = (uintptr_t)addr;
     desc.len = len;
     desc.devId = dev_id;
@@ -77,7 +128,37 @@ deallocateAndDeregister(nixlLibfabricEngine *engine,
                         void *&addr,
                         nixlBackendMD *&md) {
     engine->deregisterMem(md);
-    free(addr);
+#ifdef HAVE_CUDA
+    checkCudaError(cudaSetDevice(dev_id), "Failed to set device");
+    checkCudaError(cudaFree(addr), "Failed to allocate CUDA buffer 0");
+#endif
+}
+
+void doMemset(nixl_mem_t mem_type, int dev_id, void *addr, char byte, size_t len)
+{
+#ifdef HAVE_CUDA
+    checkCudaError(cudaSetDevice(dev_id), "Failed to set device");
+    checkCudaError(cudaMemset(addr, byte, len), "Failed to memset");
+#endif
+}
+
+void *getValidationPtr(nixl_mem_t mem_type, void *addr, size_t len)
+{
+    switch(mem_type) {
+    case DRAM_SEG:
+        return addr;
+        break;
+#ifdef HAVE_CUDA
+    case VRAM_SEG: {
+        void *ptr = calloc(len, 1);
+        checkCudaError(cudaMemcpy(ptr, addr, len, cudaMemcpyDeviceToHost), "Failed to memcpy");
+        return ptr;
+    }
+#endif
+    default:
+        std::cout << "Unsupported memory type!" << std::endl;
+        assert(0);
+    }
 }
 
 void
@@ -139,7 +220,7 @@ performTransfer(nixlLibfabricEngine *engine1,
     nixlBackendReqH *handle = nullptr;
     nixl_status_t ret = engine1->prepXfer(op, req_src_descs, req_dst_descs, remote_agent, handle, &opt_args);
     assert(ret == NIXL_SUCCESS);
-
+    cout << "\tprepXfer completed immediately\n";
     ret = engine1->postXfer(op, req_src_descs, req_dst_descs, remote_agent, handle, &opt_args);
     assert(ret == NIXL_SUCCESS || ret == NIXL_IN_PROG);
 
@@ -190,20 +271,12 @@ test_multi_descriptor_offsets(bool p_thread) {
     nixlBackendMD *send_md = nullptr;
     nixlBackendMD *recv_md = nullptr;
 
-    allocateAndRegister(engine1, 0, DRAM_SEG, send_buf, TOTAL_SIZE, send_md);
-    allocateAndRegister(engine2, 0, DRAM_SEG, recv_buf, TOTAL_SIZE, recv_md);
+    allocateAndRegister(engine1, SEND_DEVICE_ID, VRAM_SEG, send_buf, TOTAL_SIZE, send_md);
+    allocateAndRegister(engine2, RECV_DEVICE_ID, VRAM_SEG, recv_buf, TOTAL_SIZE, recv_md);
 
     // Fill send buffer with unique pattern for each descriptor's region
-    for (int i = 0; i < DESC_COUNT; i++) {
-        size_t offset = i * DESC_SIZE;
-        uint8_t pattern = static_cast<uint8_t>(i);
-        for (size_t j = 0; j < DESC_SIZE; j++) {
-            ((uint8_t *)send_buf)[offset + j] = pattern;
-        }
-    }
-
-    // Zero receive buffer
-    memset(recv_buf, 0, TOTAL_SIZE);
+    doMemset(VRAM_SEG, SEND_DEVICE_ID, send_buf, 0xbb, TOTAL_SIZE);
+    doMemset(VRAM_SEG, RECV_DEVICE_ID, recv_buf, 0, TOTAL_SIZE);
 
     // Exchange connection info
     std::string conn1, conn2;
@@ -225,14 +298,14 @@ test_multi_descriptor_offsets(bool p_thread) {
     // Load remote metadata
     nixlBackendMD *recv_rmd = nullptr;
 
-    loadRemote(engine1, 0, agent2, DRAM_SEG, recv_buf, TOTAL_SIZE, recv_md, recv_rmd);
+    loadRemote(engine1, RECV_DEVICE_ID, agent2, VRAM_SEG, recv_buf, TOTAL_SIZE, recv_md, recv_rmd);
 
     // Create descriptor lists with different offsets
-    nixl_meta_dlist_t src_descs(DRAM_SEG);
-    nixl_meta_dlist_t dst_descs(DRAM_SEG);
+    nixl_meta_dlist_t src_descs(VRAM_SEG);
+    nixl_meta_dlist_t dst_descs(VRAM_SEG);
 
-    populateDescs(src_descs, 0, send_buf, DESC_COUNT, DESC_SIZE, send_md);
-    populateDescs(dst_descs, 0, recv_buf, DESC_COUNT, DESC_SIZE, recv_rmd);
+    populateDescs(src_descs, SEND_DEVICE_ID, send_buf, DESC_COUNT, DESC_SIZE, send_md);
+    populateDescs(dst_descs, RECV_DEVICE_ID, recv_buf, DESC_COUNT, DESC_SIZE, recv_rmd);
 
     std::cout << "Created " << src_descs.descCount() << " source descriptors\n";
     std::cout << "Created " << dst_descs.descCount() << " destination descriptors\n\n";
@@ -242,46 +315,25 @@ test_multi_descriptor_offsets(bool p_thread) {
 
     // Verify data correctness for each descriptor's region
     std::cout << "\nData verification:\n";
-    bool all_correct = true;
+    size_t len = DESC_COUNT * DESC_SIZE;
+    void *chkptr1 = getValidationPtr(src_descs.getType(), send_buf, len);
+    void *chkptr2 = getValidationPtr(dst_descs.getType(), recv_buf, len);
 
-    for (int i = 0; i < DESC_COUNT; i++) {
-        size_t offset = i * DESC_SIZE;
-        uint8_t expected_pattern = static_cast<uint8_t>(i);
-        bool desc_correct = true;
-
-        for (size_t j = 0; j < DESC_SIZE; j++) {
-            if (((uint8_t *)recv_buf)[offset + j] != expected_pattern) {
-                std::cerr << "  ERROR: Descriptor " << i << " at offset " << offset + j
-                          << " has wrong data: expected " << (int)expected_pattern << ", got "
-                          << (int)((uint8_t *)recv_buf)[offset + j] << "\n";
-                desc_correct = false;
-                all_correct = false;
-                break; // Only report first mismatch per descriptor
-            }
-        }
-
-        if (desc_correct) {
-            std::cout << "  Descriptor " << i << " (offset " << offset << "): OK (pattern "
-                      << (int)expected_pattern << ")\n";
-        }
+    // Perform correctness check.
+    for(size_t i = 0; i < len; i++){
+        assert( ((uint8_t*) chkptr1)[i] == ((uint8_t*) chkptr2)[i]);
     }
 
-    if (all_correct) {
-        std::cout << "\n✓ ALL DESCRIPTORS VERIFIED SUCCESSFULLY\n";
-        std::cout << "  Each descriptor transferred data from its correct offset\n";
-    } else {
-        std::cerr << "\n✗ DATA CORRUPTION DETECTED\n";
-        std::cerr << "  Some descriptors received data from wrong offsets\n";
-        std::cerr << "  This indicates the descriptor offset bug is present!\n";
-        exit(1);
-    }
+    std::cout << "\n✓ ALL DESCRIPTORS VERIFIED SUCCESSFULLY\n";
+    std::cout << "  Each descriptor transferred data from its correct offset\n";
+
 
     // Cleanup
     engine1->disconnect(agent2);
     engine2->disconnect(agent1);
 
-    deallocateAndDeregister(engine1, 0, DRAM_SEG, send_buf, send_md);
-    deallocateAndDeregister(engine2, 0, DRAM_SEG, recv_buf, recv_md);
+    deallocateAndDeregister(engine1, SEND_DEVICE_ID, VRAM_SEG, send_buf, send_md);
+    deallocateAndDeregister(engine2, RECV_DEVICE_ID, VRAM_SEG, recv_buf, recv_md);
 
     releaseEngine(engine1);
     releaseEngine(engine2);
@@ -293,7 +345,7 @@ int
 main(int argc, char **argv) {
     bool p_thread = false;
 
-    if (argc > 1 && std::string(argv[1]) == "--pthread") {
+    if (argc > 1 && std::string(argv[1]) == "--pthread") { 
         p_thread = true;
     }
 

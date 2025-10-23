@@ -136,20 +136,21 @@ else
     warning('SynapseAI not found. Habana Gaudi device support will be disabled.')
 endif
 
+sycl_dep = dependency('sycl_dep', required : false)
 sycl_root = '/opt/intel/oneapi/compiler/2025.1'
-sycl_inc = include_directories(join_paths(sycl_root, 'include'))
-
 sycl_libdir = join_paths(sycl_root, 'lib')
+sycl_lib = cpp.find_library('sycl', dirs: [sycl_libdir], required: false)
 
-sycl_dep = declare_dependency(
-  include_directories : sycl_inc,
-  link_args : ['-L' + sycl_libdir, '-lsycl', '-lze_loader']
-)
-
-if sycl_dep.found()
+if sycl_lib.found()
+    sycl_inc = include_directories(join_paths(sycl_root, 'include'))
+    sycl_dep = declare_dependency(
+        include_directories: sycl_inc,
+        dependencies: sycl_lib,
+        link_args: ['-L' + sycl_libdir, '-lze_loader']
+    )
     message('Found SYCL support for XPU devices')
 else
-    error('Cannot found SYCL support for XPU devices')
+    message('Cannot find SYCL support for XPU devices')
 endif
 
 # DOCA

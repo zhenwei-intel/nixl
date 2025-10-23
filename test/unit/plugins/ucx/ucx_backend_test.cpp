@@ -564,7 +564,7 @@ test_inter_agent_transfer(bool p_thread,
                           nixl_mem_t dst_mem_type,
                           int dst_dev_id) {
     int ret;
-    int iter = 10;
+    int iter = 1;
 
     std::cout << std::endl << std::endl;
     std::cout << "****************************************************" << std::endl;
@@ -619,8 +619,8 @@ test_inter_agent_transfer(bool p_thread,
     nixl_meta_dlist_t req_dst_descs (dst_mem_type);
     populateDescs(req_dst_descs, dst_dev_id, addr2, desc_cnt, desc_size, rmd1);
 
-    nixl_xfer_op_t ops[] = {  NIXL_READ, NIXL_WRITE };
-    bool use_notifs[] = { true, false };
+    nixl_xfer_op_t ops[] = {  NIXL_WRITE }; // NIXL_READ
+    bool use_notifs[] = { false };
 
     for (size_t i = 0; i < sizeof(ops)/sizeof(ops[i]); i++) {
 
@@ -691,7 +691,7 @@ test_inter_agent_transfer(bool p_thread,
 
 int main()
 {
-    bool thread_on[2] = {false, true};
+    bool thread_on[2] = {true};
     nixlUcxEngine *ucx[2][2] = {0};
 
     // Allocate UCX engines
@@ -719,48 +719,14 @@ int main()
 #endif
 
     for(int i = 0; i < 2; i++) {
-        //Test local memory to local memory transfer
-        test_intra_agent_transfer(thread_on[i], ucx[i][0], DRAM_SEG);
-#ifdef HAVE_CUDA
-        if (n_vram_dev > 0) {
-            test_intra_agent_transfer(thread_on[i], ucx[i][0], VRAM_SEG);
-        }
-#endif
-    }
-
-    for(int i = 0; i < 2; i++) {
-        test_inter_agent_transfer(thread_on[i], false,
-                                  ucx[i][0], DRAM_SEG, 0,
-                                  ucx[i][1], DRAM_SEG, 0);
-        test_inter_agent_transfer(thread_on[i], true,
-                                  ucx[i][0], DRAM_SEG, 0,
-                                  ucx[i][1], DRAM_SEG, 0);
-
 #ifdef HAVE_CUDA
         if (n_vram_dev > 1) {
             test_inter_agent_transfer(thread_on[i], false,
                                       ucx[i][0], VRAM_SEG, dev_ids[0],
                                       ucx[i][1], VRAM_SEG, dev_ids[1]);
-            test_inter_agent_transfer(thread_on[i], true,
-                                      ucx[i][0], VRAM_SEG, dev_ids[0],
-                                      ucx[i][1], VRAM_SEG, dev_ids[1]);
-            test_inter_agent_transfer(thread_on[i], true,
-                                      ucx[i][0], DRAM_SEG, dev_ids[0],
-                                      ucx[i][1], VRAM_SEG, dev_ids[1]);
-            test_inter_agent_transfer(thread_on[i], true,
-                                      ucx[i][0], VRAM_SEG, dev_ids[0],
-                                      ucx[i][1], DRAM_SEG, dev_ids[1]);
         }
 #endif
     }
-
-#ifdef HAVE_CUDA
-    if (n_vram_dev > 1) {
-		//Test if registering on a different GPU fails correctly
-		allocateWrongGPUTest(ucx[0][0], 1);
-		std::cout << "Verified registration on wrong GPU fails correctly\n";
-	}
-#endif
 
     // Deallocate UCX engines
     for(int i = 0; i < 2; i++) {

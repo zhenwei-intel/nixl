@@ -36,3 +36,10 @@ ucx_backend_multi = executable('ucx_backend_multi',
            include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/ucx'],
            cpp_args : cpp_args,
            install: true)
+
+ucx_backend_integration_test_cuda = executable('ucx_backend_integration_test_cuda',
+        'ucx_backend_integration_test_cuda.cpp',
+        dependencies: [nixl_dep, nixl_infra, nixl_common_deps, ucx_backend_dep, ucx_dep, thread_dep] + cuda_dependencies,
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/ucx'],
+        cpp_args : cpp_args,
+        install: true)
