@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from nixl._api import nixl_agent, nixl_agent_config
 import pickle
+import time
 
 def init_agent(name):
     config = nixl_agent_config(backends=["UCX"])
@@ -37,7 +38,7 @@ def main():
     tensor = torch.ones(num_elements, dtype=torch.float32, device="cuda:0")
     agent = init_agent("prefill")
     descs, indices = create_descs(tensor.data_ptr(), num_descs, total_length, device_id=0)
-    xfer_descs = register_memory(agent, descs, mem_type="VRAM")
+    xfer_descs = register_memory(agent, descs, mem_type="VRAM")  # 这一句不能省
 
     # 连接 server，获取 metadata
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -55,6 +56,7 @@ def main():
         print("[Client] Sent metadata and xfer_descs to server")
         # 等待 server 完成 transfer
         # 可以根据需要实现进一步的同步或检查
+    time.sleep(3) # 不能省，要不然这个地址会被释放掉
     print("[Client] Tensor after transfer:", tensor)
 
 if __name__ == "__main__":
