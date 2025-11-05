@@ -1,9 +1,6 @@
-import time
 import numpy as np
 import torch
-import nixl._utils as nixl_utils
 from nixl._api import nixl_agent, nixl_agent_config
-from nixl.logging import get_logger
 
 def init_agent(name):
     config = nixl_agent_config(backends=["UCX"])
@@ -57,7 +54,17 @@ def main():
     assert xfer_handle
     print(xfer_handle)
     dst_agent.transfer(xfer_handle)
-    time.sleep(10)
+
+    transfer_done = False
+    while not transfer_done:
+        state = dst_agent.check_xfer_state(xfer_handle)
+        if state == "ERR":
+            print("Transfer got to Error state.")
+            exit()
+        elif state == "DONE":
+            transfer_done = True
+            print("Transfer done")
+
     print(dst_tensor) 
 
 if __name__ == "__main__":
