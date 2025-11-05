@@ -6,12 +6,12 @@ def init_agent(name):
     config = nixl_agent_config(backends=["UCX"])
     return nixl_agent(name, config)
 
-def create_descs(addr_base, num_descs, length):
+def create_descs(addr_base, num_descs, length, device_id=0):
     descs = np.zeros((num_descs, 3), dtype=np.uint64)
     indices = np.arange(num_descs)
     descs[:, 0] = addr_base + indices * length
     descs[:, 1] = length
-    descs[:, 2] = 0
+    descs[:, 2] = device_id
     return descs, indices
 
 def register_memory(agent, descs, mem_type="DRAM"):
@@ -26,16 +26,16 @@ def main():
     total_length = num_elements * element_size
 
     # Source tensor and agent
-    src_tensor = torch.ones(num_elements, dtype=torch.float32)
+    src_tensor = torch.ones(num_elements, dtype=torch.float32, device="cuda:0")
     src_agent = init_agent("prefill")
-    src_descs, src_indices = create_descs(src_tensor.data_ptr(), num_descs, total_length)
-    src_xfer_descs = register_memory(src_agent, src_descs)
+    src_descs, src_indices = create_descs(src_tensor.data_ptr(), num_descs, total_length, device_id=0)
+    src_xfer_descs = register_memory(src_agent, src_descs, mem_type="VRAM")
 
     # Destination tensor and agent
-    dst_tensor = torch.zeros(num_elements, dtype=torch.float32)
+    dst_tensor = torch.zeros(num_elements, dtype=torch.float32, device="cuda:1")
     dst_agent = init_agent("decode")
-    dst_descs, dst_indices = create_descs(dst_tensor.data_ptr(), num_descs, total_length)
-    dst_xfer_descs = register_memory(dst_agent, dst_descs)
+    dst_descs, dst_indices = create_descs(dst_tensor.data_ptr(), num_descs, total_length, device_id=1)
+    dst_xfer_descs = register_memory(dst_agent, dst_descs, mem_type="VRAM")
 
     # Setup remote agent and transfer handles
     src_metadata = src_agent.get_agent_metadata()
