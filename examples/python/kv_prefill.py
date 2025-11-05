@@ -47,9 +47,10 @@ def main():
         # 发送自己的 agent metadata 和 xfer_descs
         my_info = {
             "metadata": agent.get_agent_metadata(),
-            "xfer_descs": xfer_descs,
+            "xfer_descs": descs,
             "indices": indices
         }
+        print(my_info)
         s.sendall(pickle.dumps(my_info))
         print("[Client] Sent metadata and xfer_descs to server")
         # 等待 server 完成 transfer

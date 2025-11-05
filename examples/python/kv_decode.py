@@ -53,9 +53,10 @@ def main():
             client_data = conn.recv(4096)
             import pickle
             client_info = pickle.loads(client_data)
+            print(client_info)
             remote_agent_name = agent.add_remote_agent(client_info["metadata"])
             local_prep_handle = agent.prep_xfer_dlist("NIXL_INIT_AGENT", xfer_descs)
-            remote_prep_handle = agent.prep_xfer_dlist(remote_agent_name, client_info["xfer_descs"])
+            remote_prep_handle = agent.prep_xfer_dlist(remote_agent_name, agent.get_xfer_descs(client_info["xfer_descs"], "VRAM"))
             xfer_handle = agent.make_prepped_xfer(
                 "READ",
                 local_prep_handle,
