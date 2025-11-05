@@ -79,6 +79,34 @@ if sycl_dep.found()
         include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
         install: false,
     )
+    
+    test_fi_info = executable(
+        'test_fi_info',
+        'test_fi_info.cpp',
+        dependencies: libfabric_test_deps,
+        cpp_args: compile_flags,
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
+        install: false,
+    )
+
+    test_fi_info = executable(
+        'test_mr_register',
+        'test_mr_register.cpp',
+        dependencies: libfabric_test_deps,
+        cpp_args: compile_flags,
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
+        install: false,
+    )
+
+    test_fi_info = executable(
+        'test_mr_register_verbs',
+        'test_mr_register_verbs.cpp',
+        dependencies: libfabric_test_deps,
+        cpp_args: compile_flags,
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
+        install: false,
+    )
+
 endif
 
 if cuda_dep.found()
@@ -90,34 +118,16 @@ if cuda_dep.found()
         include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
         install: false,
     )
+
+    test_fi_info_cuda = executable(
+        'test_mr_register_cuda',
+        'test_mr_register_cuda.cpp',
+        dependencies: libfabric_test_deps,
+        cpp_args: compile_flags,
+        include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
+        install: false,
+    )
 endif
-
-test_fi_info = executable(
-    'test_fi_info',
-    'test_fi_info.cpp',
-    dependencies: libfabric_test_deps,
-    cpp_args: compile_flags,
-    include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
-    install: false,
-)
-
-test_fi_info = executable(
-    'test_mr_register',
-    'test_mr_register.cpp',
-    dependencies: libfabric_test_deps,
-    cpp_args: compile_flags,
-    include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
-    install: false,
-)
-
-test_fi_info = executable(
-    'test_mr_register_verbs',
-    'test_mr_register_verbs.cpp',
-    dependencies: libfabric_test_deps,
-    cpp_args: compile_flags,
-    include_directories: [nixl_inc_dirs, utils_inc_dirs, '../../../../src/plugins/libfabric'],
-    install: false,
-)
 
 test('libfabric_backend_integration',
      test_backend_integration,
