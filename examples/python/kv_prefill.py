@@ -22,6 +22,12 @@ def register_memory(agent, descs, mem_type="DRAM"):
     return agent.get_xfer_descs(descs, mem_type)
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="KV Client")
+    parser.add_argument('--ip', type=str, default='127.0.0.1', help='Server IP address')
+    parser.add_argument('--port', type=int, default=50007, help='Server port')
+    args = parser.parse_args()
+
     num_elements = 100
     num_descs = 1
     element_size = 4  # float32
@@ -35,8 +41,8 @@ def main():
 
     # 连接 server，获取 metadata
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect(("localhost", 50007))
-        print("[Client] Connected to server")
+        s.connect((args.ip, args.port))
+        print(f"[Client] Connected to server at {args.ip}:{args.port}")
         metadata = s.recv(4096)
         # 发送自己的 agent metadata 和 xfer_descs
         my_info = {

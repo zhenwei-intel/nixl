@@ -21,6 +21,12 @@ def register_memory(agent, descs, mem_type="DRAM"):
     return agent.get_xfer_descs(descs, mem_type)
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="KV Server")
+    parser.add_argument('--ip', type=str, default='127.0.0.1', help='Server IP address')
+    parser.add_argument('--port', type=int, default=50007, help='Server port')
+    args = parser.parse_args()
+
     num_elements = 100
     num_descs = 1
     element_size = 4  # float32
@@ -34,9 +40,9 @@ def main():
 
     # 启动 socket server，等待 client 连接
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("localhost", 50007))
+        s.bind((args.ip, args.port))
         s.listen(1)
-        print("[Server] Waiting for client...")
+        print(f"[Server] Waiting for client at {args.ip}:{args.port} ...")
         conn, addr = s.accept()
         with conn:
             print(f"[Server] Connected by {addr}")
