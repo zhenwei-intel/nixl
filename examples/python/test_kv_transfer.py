@@ -3,7 +3,7 @@ import torch
 from nixl._api import nixl_agent, nixl_agent_config
 
 def init_agent(name):
-    config = nixl_agent_config(backends=["LIBFABRIC"])
+    config = nixl_agent_config(backends=["UCX"])
     return nixl_agent(name, config)
 
 def create_descs(addr_base, num_descs, length, device_id=0):
@@ -21,7 +21,8 @@ def create_descs(addr_base, num_descs, length, device_id=0):
 def register_memory(agent, descs, mem_type="DRAM"):
     reg_descs = agent.get_reg_descs(descs, mem_type)
     assert agent.register_memory(reg_descs) is not None
-    return agent.get_xfer_descs(descs, mem_type)
+    xfer_descs = agent.get_xfer_descs(descs, mem_type)
+    return reg_descs, xfer_descs
 
 def main():
     num_elements = 100
@@ -33,13 +34,13 @@ def main():
     src_tensor = torch.ones(num_elements, dtype=torch.float32, device="cuda:0")
     src_agent = init_agent("prefill")
     src_descs, src_indices = create_descs(src_tensor.data_ptr(), num_descs, total_length, device_id=0)
-    src_xfer_descs = register_memory(src_agent, src_descs, mem_type="VRAM")
+    src_reg_descs, src_xfer_descs = register_memory(src_agent, src_descs, mem_type="VRAM")
 
     # Destination tensor and agent
     dst_tensor = torch.zeros(num_elements, dtype=torch.float32, device="cuda:1")
     dst_agent = init_agent("decode")
     dst_descs, dst_indices = create_descs(dst_tensor.data_ptr(), num_descs, total_length, device_id=1)
-    dst_xfer_descs = register_memory(dst_agent, dst_descs, mem_type="VRAM")
+    dst_reg_descs, dst_xfer_descs = register_memory(dst_agent, dst_descs, mem_type="VRAM")
 
     # Setup remote agent and transfer handles
     src_metadata = src_agent.get_agent_metadata()
@@ -69,7 +70,14 @@ def main():
             transfer_done = True
             print("Transfer done")
 
-    print(dst_tensor) 
+    print(dst_tensor)
+
+    dst_agent.release_xfer_handle(xfer_handle)
+    dst_agent.release_dlist_handle(local_prep_handle)
+    dst_agent.release_dlist_handle(remote_prep_handle)
+    dst_agent.remove_remote_agent(remote_agent_name)
+    src_agent.deregister_memory(src_reg_descs)
+    dst_agent.deregister_memory(dst_reg_descs)
 
 if __name__ == "__main__":
     main()
