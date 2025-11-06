@@ -30,13 +30,13 @@ def main():
     total_length = num_elements * element_size
 
     # Source tensor and agent
-    src_tensor = torch.ones(num_elements, dtype=torch.float32, device="cuda:0")
+    src_tensor = torch.ones(num_elements, dtype=torch.float32).to("xpu:0")
     src_agent = init_agent("prefill")
     src_descs, src_indices = create_descs(src_tensor.data_ptr(), num_descs, total_length, device_id=0)
     src_xfer_descs = register_memory(src_agent, src_descs, mem_type="VRAM")
 
     # Destination tensor and agent
-    dst_tensor = torch.zeros(num_elements, dtype=torch.float32, device="cuda:1")
+    dst_tensor = torch.zeros(num_elements, dtype=torch.float32).to("xpu:1")
     dst_agent = init_agent("decode")
     dst_descs, dst_indices = create_descs(dst_tensor.data_ptr(), num_descs, total_length, device_id=1)
     dst_xfer_descs = register_memory(dst_agent, dst_descs, mem_type="VRAM")
