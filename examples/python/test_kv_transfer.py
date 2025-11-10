@@ -20,7 +20,7 @@ def create_descs(addr_base, num_descs, length, device_id=0):
 
 def register_memory(agent, descs, mem_type="DRAM"):
     reg_descs = agent.get_reg_descs(descs, mem_type)
-    assert agent.register_memory(reg_descs) is not None
+    assert agent.register_memory(reg_descs, backends=["UCX"]) is not None
     xfer_descs = agent.get_xfer_descs(descs, mem_type)
     return reg_descs, xfer_descs
 
@@ -31,7 +31,7 @@ def main():
     total_length = num_elements * element_size
 
     # Source tensor and agent
-    src_tensor = torch.ones(num_elements, dtype=torch.float32, device="cuda:0")
+    src_tensor = torch.arange(num_elements, dtype=torch.float32, device="cuda:0")
     src_agent = init_agent("prefill")
     src_descs, src_indices = create_descs(src_tensor.data_ptr(), num_descs, total_length, device_id=0)
     src_reg_descs, src_xfer_descs = register_memory(src_agent, src_descs, mem_type="VRAM")

@@ -91,12 +91,12 @@ def create_descs(addr_base, num_descs, length, device_id=0):
 
 def register_memory(agent, descs, mem_type="DRAM"):
     reg_descs = agent.get_reg_descs(descs, mem_type)
-    assert agent.register_memory(reg_descs) is not None
+    agent.register_memory(reg_descs, backends=["LIBFABRIC"])
     xfer_descs = agent.get_xfer_descs(descs, mem_type)
     return reg_descs, xfer_descs
 
 def main():
-    num_elements = 100
+    num_elements = 1024
     num_descs = 1
     element_size = 4  # float32
     total_length = num_elements * element_size

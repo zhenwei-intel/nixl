@@ -17,7 +17,7 @@ def create_descs(addr_base, num_descs, length, device_id=0):
 
 def register_memory(agent, descs, mem_type="DRAM"):
     reg_descs = agent.get_reg_descs(descs, mem_type)
-    assert agent.register_memory(reg_descs) is not None
+    assert agent.register_memory(reg_descs, backends=["UCX"]) is not None
     return agent.get_xfer_descs(descs, mem_type)
 
 def main():
