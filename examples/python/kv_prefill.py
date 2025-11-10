@@ -4,6 +4,7 @@ import torch
 from nixl._api import nixl_agent, nixl_agent_config
 import pickle
 import time
+import zmq
 
 def init_agent(name):
     config = nixl_agent_config(backends=["UCX"])
@@ -39,25 +40,29 @@ def main():
     agent = init_agent("prefill")
     descs, indices = create_descs(tensor.data_ptr(), num_descs, total_length, device_id=0)
     xfer_descs = register_memory(agent, descs, mem_type="VRAM")  # 这一句不能省
+    my_info = {
+        "metadata": agent.get_agent_metadata(),
+        "xfer_descs": descs,
+        "indices": indices
+    }
+    print(my_info)
+    packed_info = pickle.dumps(my_info)
 
     # 连接 server，获取 metadata
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((args.ip, args.port))
-        print(f"[Client] Connected to server at {args.ip}:{args.port}")
-        metadata = s.recv(4096)
-        # 发送自己的 agent metadata 和 xfer_descs
-        my_info = {
-            "metadata": agent.get_agent_metadata(),
-            "xfer_descs": descs,
-            "indices": indices
-        }
-        print(my_info)
-        s.sendall(pickle.dumps(my_info))
-        print("[Client] Sent metadata and xfer_descs to server")
-        # 等待 server 完成 transfer
-        # 可以根据需要实现进一步的同步或检查
+    # 启动 socket server，等待 client 连接
+    context = zmq.Context()
+    socket_zmq = context.socket(zmq.REP)  # REP means reply
+    socket_zmq.bind(f"tcp://{args.ip}:{args.port}")
+    print(f"[Server] Waiting for client at {args.ip}:{args.port} ...")
+    msg = socket_zmq.recv()
+    if msg == b"get_metadata":
+        socket_zmq.send(packed_info)
+    else:
+        print(f"[Server] Unexpected message: {msg}")
+        return
+
     time.sleep(3) # 不能省，要不然这个地址会被释放掉
-    print("[Client] Tensor after transfer:", tensor)
+    print("[Server] Tensor after transfer:", tensor)
 
 if __name__ == "__main__":
     main()

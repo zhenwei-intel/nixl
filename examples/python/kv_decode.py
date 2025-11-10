@@ -2,6 +2,8 @@ import socket
 import numpy as np
 import torch
 from nixl._api import nixl_agent, nixl_agent_config
+import zmq
+import pickle
 
 def init_agent(name):
     config = nixl_agent_config(backends=["UCX"])
@@ -22,7 +24,7 @@ def register_memory(agent, descs, mem_type="DRAM"):
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="KV Server")
+    parser = argparse.ArgumentParser(description="KV decode")
     parser.add_argument('--ip', type=str, default='127.0.0.1', help='Server IP address')
     parser.add_argument('--port', type=int, default=50007, help='Server port')
     args = parser.parse_args()
@@ -38,47 +40,41 @@ def main():
     descs, indices = create_descs(tensor.data_ptr(), num_descs, total_length, device_id=1)
     xfer_descs = register_memory(agent, descs, mem_type="VRAM")
 
-    # 启动 socket server，等待 client 连接
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((args.ip, args.port))
-        s.listen(1)
-        print(f"[Server] Waiting for client at {args.ip}:{args.port} ...")
-        conn, addr = s.accept()
-        with conn:
-            print(f"[Server] Connected by {addr}")
-            # 发送 agent metadata 给 client
-            metadata = agent.get_agent_metadata()
-            conn.sendall(metadata)
-            # 接收 client 的 agent name 和 xfer_descs
-            client_data = conn.recv(4096)
-            import pickle
-            client_info = pickle.loads(client_data)
-            print(client_info)
-            remote_agent_name = agent.add_remote_agent(client_info["metadata"])
-            local_prep_handle = agent.prep_xfer_dlist("NIXL_INIT_AGENT", xfer_descs)
-            remote_prep_handle = agent.prep_xfer_dlist(remote_agent_name, agent.get_xfer_descs(client_info["xfer_descs"], "VRAM"))
-            xfer_handle = agent.make_prepped_xfer(
-                "READ",
-                local_prep_handle,
-                indices,
-                remote_prep_handle,
-                client_info["indices"],
-                b"UUID2"
-            )
-            assert xfer_handle
-            print("[Server] xfer_handle:", xfer_handle)
-            agent.transfer(xfer_handle)
-            # 检查 transfer 状态
-            transfer_done = False
-            while not transfer_done:
-                state = agent.check_xfer_state(xfer_handle)
-                if state == "ERR":
-                    print("[Server] Transfer got to Error state.")
-                    break
-                elif state == "DONE":
-                    transfer_done = True
-                    print("[Server] Transfer done")
-            print("[Server] Tensor after transfer:", tensor)
+    context = zmq.Context()
+    socket_zmq = context.socket(zmq.REQ)
+    zmq_addr = f"tcp://{args.ip}:{args.port}"
+    socket_zmq.connect(zmq_addr)
+    print(f"[Decode] Connected to server at {zmq_addr}")
+    # 请求 metadata
+    socket_zmq.send(b"get_metadata")
+    picked_info = socket_zmq.recv()
+    prefill_info = pickle.loads(picked_info)
+    print("[Decode] Received prefill_info:", prefill_info)
+    remote_agent_name = agent.add_remote_agent(prefill_info["metadata"])
+    local_prep_handle = agent.prep_xfer_dlist("NIXL_INIT_AGENT", xfer_descs)
+    remote_prep_handle = agent.prep_xfer_dlist(remote_agent_name, agent.get_xfer_descs(prefill_info["xfer_descs"], "VRAM"))
+    xfer_handle = agent.make_prepped_xfer(
+        "READ",
+        local_prep_handle,
+        indices,
+        remote_prep_handle,
+        prefill_info["indices"],
+        b"UUID2"
+    )
+    assert xfer_handle
+    print("[Decode] xfer_handle:", xfer_handle)
+    agent.transfer(xfer_handle)
+    # 检查 transfer 状态
+    transfer_done = False
+    while not transfer_done:
+        state = agent.check_xfer_state(xfer_handle)
+        if state == "ERR":
+            print("[Decode] Transfer got to Error state.")
+            break
+        elif state == "DONE":
+            transfer_done = True
+            print("[Decode] Transfer done")
+    print("[Decode] Tensor after transfer:", tensor)
 
 if __name__ == "__main__":
     main()
