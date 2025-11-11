@@ -16,6 +16,10 @@ def init_agent(name, backend):
 def create_descs(addr_base, num_descs, length, device_id=0):
     descs = np.zeros((num_descs, 3), dtype=np.uint64)
     indices = np.arange(num_descs)
+
+    # 确保所有运算都使用 uint64
+    addr_base = np.uint64(addr_base)
+    length = np.uint64(length)
     descs[:, 0] = addr_base + indices * length
     descs[:, 1] = length
     descs[:, 2] = device_id
@@ -50,6 +54,7 @@ def main():
     # Client tensor and agent
     tensor = torch.arange(num_elements, dtype=torch.float32).to(args.device)
     agent = init_agent("prefill", backend=args.backend)
+    print("init prefill agent done")
     descs, indices = create_descs(tensor.data_ptr(), num_descs, total_length, device_id=device_id)
     xfer_descs = register_memory(agent, descs, mem_type=mem_type, backend=args.backend)  # can not be omitted
     my_info = {
@@ -71,7 +76,7 @@ def main():
     else:
         print(f"[Server] Unexpected message: {msg}")
         return
-
+    print("[Server] sended metadata to client")
     time.sleep(args.timeout)  # can not be omitted
     print("[Server] Tensor after transfer:", tensor)
 

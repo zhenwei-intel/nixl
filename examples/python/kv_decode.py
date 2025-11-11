@@ -17,6 +17,10 @@ def init_agent(name, backend):
 def create_descs(addr_base, num_descs, length, device_id=0):
     descs = np.zeros((num_descs, 3), dtype=np.uint64)
     indices = np.arange(num_descs)
+
+    # 确保所有运算都使用 uint64
+    addr_base = np.uint64(addr_base)
+    length = np.uint64(length)
     descs[:, 0] = addr_base + indices * length
     descs[:, 1] = length
     descs[:, 2] = device_id
@@ -49,6 +53,7 @@ def main():
     # Server tensor and agent
     tensor = torch.zeros(num_elements, dtype=torch.float32).to(args.device)
     agent = init_agent("decode", backend=args.backend)
+    print("init decode agent done")
     descs, indices = create_descs(tensor.data_ptr(), num_descs, total_length, device_id=device_id)
     xfer_descs = register_memory(agent, descs, mem_type=mem_type, backend=args.backend)
 
@@ -81,7 +86,7 @@ def main():
         b"UUID2"
     )
     assert xfer_handle
-    print("[Decode] xfer_handle:", xfer_handle)
+    print("[Decode] start data transfering")
     agent.transfer(xfer_handle)
     # Check transfer status
     transfer_done = False
