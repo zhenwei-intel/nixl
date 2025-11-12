@@ -87,40 +87,40 @@ def read_blocks(block_ids: Iterator[int], agent: NixlAgent,
         logging.warning("No block IDs provided for transfer.")
         return 0, 0
     
-    try:
-        local_ids = get_block_desc_ids(sender_meta.num_blocks, block_ids)
-        remote_ids = get_block_desc_ids(sender_meta.num_blocks, block_ids)
-        
-        t0 = time.perf_counter_ns()
-        xfer_handle = agent.make_prepped_xfer(
-            "READ",
-            local_xfer_handle,
-            local_ids,
-            remote_xfer_handle,
-            remote_ids,
-        )
-        agent.transfer(xfer_handle)
+    # try:
+    local_ids = get_block_desc_ids(sender_meta.num_blocks, block_ids)
+    remote_ids = get_block_desc_ids(sender_meta.num_blocks, block_ids)
+    
+    t0 = time.perf_counter_ns()
+    xfer_handle = agent.make_prepped_xfer(
+        "READ",
+        local_xfer_handle,
+        local_ids,
+        remote_xfer_handle,
+        remote_ids,
+    )
+    agent.transfer(xfer_handle)
 
-        while agent.check_xfer_state(xfer_handle) != "DONE":
-            time.sleep(0.00001)
-        
-        # Add data verification to ensure end-to-end transfer completion
-        try:
-            if local_kv_cache is not None:
-                # Verify data is accessible by reading a small sample
-                sample_data = local_kv_cache[:min(64, local_kv_cache.numel())]
-                # Could also check for expected patterns or non-zero values
-                _ = sample_data.sum()  # Force computation to ensure data is accessible
-        except Exception as e:
-            logging.debug(f"Data verification skipped: {e}")
-        
-        t1 = time.perf_counter_ns()  # End timing after verification
-        agent.release_xfer_handle(xfer_handle)
-        
-        return (t1 - t0) / 1e6, len(local_ids) * sender_meta.block_len  # Return latency in ms
+    while agent.check_xfer_state(xfer_handle) != "DONE":
+        time.sleep(0.00001)
+    
+    # Add data verification to ensure end-to-end transfer completion
+    try:
+        if local_kv_cache is not None:
+            # Verify data is accessible by reading a small sample
+            sample_data = local_kv_cache[:min(64, local_kv_cache.numel())]
+            # Could also check for expected patterns or non-zero values
+            _ = sample_data.sum()  # Force computation to ensure data is accessible
     except Exception as e:
-        logging.error(f"Transfer failed in read_blocks: {e}", exc_info=True)
-        raise
+        logging.debug(f"Data verification skipped: {e}")
+    
+    t1 = time.perf_counter_ns()  # End timing after verification
+    agent.release_xfer_handle(xfer_handle)
+    
+    return (t1 - t0) / 1e6, len(local_ids) * sender_meta.block_len  # Return latency in ms
+    # except Exception as e:
+    #     logging.error(f"Transfer failed in read_blocks: {e}", exc_info=True)
+    #     raise
 
 
 def summary(latencies: List[float], sender_meta: NixlAgentMetadata, args: argparse.Namespace, total_data_transferred: int, agent: NixlAgent):
@@ -345,13 +345,13 @@ def receiver_process(args: argparse.Namespace):
         logging.info(f"Starting transfer loop for {args.num_iterations} iterations...")
 
         for i in range(args.num_iterations):
-            if i % 10 == 0:  # Log every 10th iteration
-                logging.info(f"Transfer iteration {i+1}/{args.num_iterations}")
+            # if i % 10 == 0:  # Log every 10th iteration
+            logging.info(f"Transfer iteration {i+1}/{args.num_iterations}")
             start_idx = (i * args.blocks_per_xfer) % (sender_meta.num_blocks - args.blocks_per_xfer) if sender_meta.num_blocks > args.blocks_per_xfer else 0
             block_ids = list(range(start_idx, start_idx + args.blocks_per_xfer))
             # do transfer
             latency, data_transferred = read_blocks(block_ids, agent, local_xfer_handle, remote_xfer_handle, sender_meta)
-
+            # time.sleep(2)
             latencies.append(latency)
             total_data_transferred += data_transferred
 
@@ -453,7 +453,7 @@ if __name__ == "__main__":
     try:
         sender.start()
         receiver.start()
-        receiver.join(timeout=10)  # 10 second timeout
+        receiver.join(timeout=1000)  # 10 second timeout
         
         if receiver.is_alive():
             logging.warning("Receiver process didn't exit cleanly, terminating...")
