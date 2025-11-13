@@ -22,8 +22,6 @@ import pandas as pd
 # Configuration
 # ==============================================================================
 
-ZMQ_HOST = "127.0.0.1"
-ZMQ_BASE_PORT = 15555
 GET_META_MSG = b"get_meta_msg"
 SHUTDOWN_MSG = b"shutdown_msg"
 
@@ -241,7 +239,7 @@ def sender_process(args: argparse.Namespace):
         encoded_metadata = encoder.encode(metadata)
 
         with zmq.Context() as ctx, ctx.socket(zmq.ROUTER) as sock:
-            zmq_addr = f"tcp://{ZMQ_HOST}:{ZMQ_BASE_PORT}"
+            zmq_addr = f"tcp://{args.host}:{args.port}"
             sock.bind(zmq_addr)
             logging.info(f"Sender listening for handshakes on {zmq_addr}")
 
@@ -273,11 +271,11 @@ def sender_process(args: argparse.Namespace):
 
 # ------------------------------------------------------------------------------
 
-def send_shutdown_signal():
+def send_shutdown_signal(args: argparse.Namespace):
     """Helper function to send shutdown signal to sender."""
     try:
         with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
-            zmq_addr = f"tcp://{ZMQ_HOST}:{ZMQ_BASE_PORT}"
+            zmq_addr = f"tcp://{args.host}:{args.port}"
             sock.connect(zmq_addr)
             logging.info("Sending shutdown signal to sender.")
             sock.send(SHUTDOWN_MSG)
@@ -297,7 +295,7 @@ def receiver_process(args: argparse.Namespace):
     
     def cleanup_and_shutdown():
         """Send shutdown signal and cleanup."""
-        send_shutdown_signal()
+        send_shutdown_signal(args)
         logging.info("Receiver shutting down.")
     
     try:
@@ -315,7 +313,7 @@ def receiver_process(args: argparse.Namespace):
 
         logging.info("Requesting metadata from sender...")
         with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
-            zmq_addr = f"tcp://{ZMQ_HOST}:{ZMQ_BASE_PORT}"
+            zmq_addr = f"tcp://{args.host}:{args.port}"
             sock.connect(zmq_addr)
             logging.info(f"Requesting metadata from sender at {zmq_addr}...")
             sock.send(GET_META_MSG)
@@ -426,6 +424,8 @@ if __name__ == "__main__":
     parser.add_argument("--ucx-transport", type=str, default=None, help="default is tcp, you might configure as 'cuda_copy,sm'")
     parser.add_argument("--debug-ucx", action="store_true",
                         help="Enable debug mode for UCX backend (if using UCX backend)")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host address for the server")
+    parser.add_argument("--port", type=int, default=15555, help="Port number for the server")
     args = parser.parse_args()
     
     # NIXL_PLUGIN_DIR=/workspace/nixl/nixl-nixl_libfabric/build/cp310/src/plugins/libfabric python nixl_api.py  --device-type hpu --nixl_backend libfabric
@@ -499,3 +499,6 @@ if __name__ == "__main__":
                 if proc.is_alive():
                     logging.warning(f"Failed to terminate {proc.name}")
         logging.info("Benchmark finished.")
+
+    receiver.start()
+    receiver.join(timeout=1000)  # 10 second timeout
