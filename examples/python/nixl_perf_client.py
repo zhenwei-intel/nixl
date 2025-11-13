@@ -22,6 +22,8 @@ import pandas as pd
 # Configuration
 # ==============================================================================
 
+ZMQ_HOST = "100.1.0.1"
+ZMQ_BASE_PORT = 15555
 GET_META_MSG = b"get_meta_msg"
 SHUTDOWN_MSG = b"shutdown_msg"
 
@@ -63,7 +65,7 @@ def get_block_desc_ids(num_total_blocks: int, block_ids: Iterator[int]) -> List[
     return list(block_ids)
 
 
-def allocate_kv_cache(num_blocks: int, block_len: int, dtype: torch.dtype, device: str, sender=True) -> torch.Tensor:
+def allocate_kv_cache(num_blocks: int, block_len: int, dtype: torch.dtype, device: str, device_id: int, sender=True) -> torch.Tensor:
     """Allocate a KV cache buffer on the given device."""
     total_bytes = num_blocks * block_len
     num_elements = total_bytes // dtype.itemsize
@@ -76,10 +78,16 @@ def allocate_kv_cache(num_blocks: int, block_len: int, dtype: torch.dtype, devic
     if device == "hpu":
         device = "hpu"  # Use HPU device for Intel Gaudi
     
+    device_str = device
+    if device != "cpu":
+        device_str = f"{device}:{device_id}"
+
     if sender:
-        return torch.randn(num_elements, dtype=dtype, device=device)
+        ret = torch.randn(num_elements, dtype=dtype, device=device_str)
     else:
-        return torch.empty(num_elements, dtype=dtype, device=device)
+        ret = torch.empty(num_elements, dtype=dtype, device=device_str)
+    print(f"KV cache allocated on {device_str} with shape {ret.shape} and dtype {ret.dtype}")
+    return ret
 
 
 def create_xfer_descs(agent: NixlAgent, base_addr: int, num_blocks: int, block_len: int, mem_type: str):
@@ -213,7 +221,7 @@ def sender_process(args: argparse.Namespace):
         )
 
         ####### Prepare the KV cache for the sender #####
-        kv_cache = allocate_kv_cache(args.num_blocks, block_len, dtype, args.device_type, sender=True)
+        kv_cache = allocate_kv_cache(args.num_blocks, block_len, dtype, args.device_type, args.device_id, sender=True)
         print("Allocated sender KV cache")
         print(f"Tensor hash: {tensor_hash(kv_cache)}")
         torch.save(kv_cache.cpu(), "sent_kv_cache.pt")
@@ -239,7 +247,7 @@ def sender_process(args: argparse.Namespace):
         encoded_metadata = encoder.encode(metadata)
 
         with zmq.Context() as ctx, ctx.socket(zmq.ROUTER) as sock:
-            zmq_addr = f"tcp://{args.host}:{args.port}"
+            zmq_addr = f"tcp://{ZMQ_HOST}:{ZMQ_BASE_PORT}"
             sock.bind(zmq_addr)
             logging.info(f"Sender listening for handshakes on {zmq_addr}")
 
@@ -271,11 +279,11 @@ def sender_process(args: argparse.Namespace):
 
 # ------------------------------------------------------------------------------
 
-def send_shutdown_signal(args: argparse.Namespace):
+def send_shutdown_signal():
     """Helper function to send shutdown signal to sender."""
     try:
         with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
-            zmq_addr = f"tcp://{args.host}:{args.port}"
+            zmq_addr = f"tcp://{ZMQ_HOST}:{ZMQ_BASE_PORT}"
             sock.connect(zmq_addr)
             logging.info("Sending shutdown signal to sender.")
             sock.send(SHUTDOWN_MSG)
@@ -295,7 +303,7 @@ def receiver_process(args: argparse.Namespace):
     
     def cleanup_and_shutdown():
         """Send shutdown signal and cleanup."""
-        send_shutdown_signal(args)
+        send_shutdown_signal()
         logging.info("Receiver shutting down.")
     
     try:
@@ -313,7 +321,7 @@ def receiver_process(args: argparse.Namespace):
 
         logging.info("Requesting metadata from sender...")
         with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
-            zmq_addr = f"tcp://{args.host}:{args.port}"
+            zmq_addr = f"tcp://{ZMQ_HOST}:{ZMQ_BASE_PORT}"
             sock.connect(zmq_addr)
             logging.info(f"Requesting metadata from sender at {zmq_addr}...")
             sock.send(GET_META_MSG)
@@ -333,7 +341,7 @@ def receiver_process(args: argparse.Namespace):
         logging.info("Preparing local KV cache...")
         dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
         local_kv_cache = allocate_kv_cache(
-            sender_meta.num_blocks, sender_meta.block_len, dtype, args.device_type, sender=False
+            sender_meta.num_blocks, sender_meta.block_len, dtype, args.device_type, args.device_id, sender=False
         )
         print("Allocated local KV cache")
         print(local_kv_cache.abs().mean())
@@ -424,8 +432,7 @@ if __name__ == "__main__":
     parser.add_argument("--ucx-transport", type=str, default=None, help="default is tcp, you might configure as 'cuda_copy,sm'")
     parser.add_argument("--debug-ucx", action="store_true",
                         help="Enable debug mode for UCX backend (if using UCX backend)")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host address for the server")
-    parser.add_argument("--port", type=int, default=15555, help="Port number for the server")
+    parser.add_argument("--device-id", type=int, default=0, help="Device ID to use if applicable")
     args = parser.parse_args()
     
     # NIXL_PLUGIN_DIR=/workspace/nixl/nixl-nixl_libfabric/build/cp310/src/plugins/libfabric python nixl_api.py  --device-type hpu --nixl_backend libfabric
@@ -466,39 +473,7 @@ if __name__ == "__main__":
             logging.error("HPU device specified but habana_frameworks not installed. Exiting.")
             exit(1)
 
-    sender = multiprocessing.Process(target=sender_process, args=(args,), name="Sender")
+    # sender = multiprocessing.Process(target=sender_process, args=(args,), name="Sender")
     receiver = multiprocessing.Process(target=receiver_process, args=(args,), name="Receiver")
-
-    try:
-        sender.start()
-        receiver.start()
-        receiver.join(timeout=1000)  # 10 second timeout
-        
-        if receiver.is_alive():
-            logging.warning("Receiver process didn't exit cleanly, terminating...")
-            receiver.terminate()
-            receiver.join(timeout=5)
-        
-        # Wait for sender to shutdown gracefully
-        if sender.is_alive():
-            logging.info("Waiting for sender to shutdown...")
-            sender.join(timeout=10)
-            if sender.is_alive():
-                logging.warning("Sender didn't shutdown gracefully, terminating...")
-                sender.terminate()
-                sender.join(timeout=2)
-        
-    except KeyboardInterrupt:
-        logging.info("Interrupted by user, terminating processes...")
-    finally:
-        for proc in (sender, receiver):
-            if proc.is_alive():
-                logging.info(f"Force terminating {proc.name}...")
-                proc.terminate()
-                proc.join(timeout=2)
-                if proc.is_alive():
-                    logging.warning(f"Failed to terminate {proc.name}")
-        logging.info("Benchmark finished.")
-
     receiver.start()
     receiver.join(timeout=1000)  # 10 second timeout

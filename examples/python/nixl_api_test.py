@@ -65,7 +65,7 @@ def get_block_desc_ids(num_total_blocks: int, block_ids: Iterator[int]) -> List[
     return list(block_ids)
 
 
-def allocate_kv_cache(num_blocks: int, block_len: int, dtype: torch.dtype, device: str, sender=True) -> torch.Tensor:
+def allocate_kv_cache(num_blocks: int, block_len: int, dtype: torch.dtype, device: str, device_id: int, sender=True) -> torch.Tensor:
     """Allocate a KV cache buffer on the given device."""
     total_bytes = num_blocks * block_len
     num_elements = total_bytes // dtype.itemsize
@@ -78,10 +78,16 @@ def allocate_kv_cache(num_blocks: int, block_len: int, dtype: torch.dtype, devic
     if device == "hpu":
         device = "hpu"  # Use HPU device for Intel Gaudi
     
+    device_str = device
+    if device != "cpu":
+        device_str = f"{device}:{device_id}"
+
     if sender:
-        return torch.randn(num_elements, dtype=dtype, device=device)
+        ret = torch.randn(num_elements, dtype=dtype, device=device_str)
     else:
-        return torch.empty(num_elements, dtype=dtype, device=device)
+        ret = torch.empty(num_elements, dtype=dtype, device=device_str)
+    print(f"KV cache allocated on {device_str} with shape {ret.shape} and dtype {ret.dtype}")
+    return ret
 
 
 def create_xfer_descs(agent: NixlAgent, base_addr: int, num_blocks: int, block_len: int, mem_type: str):
@@ -215,7 +221,7 @@ def sender_process(args: argparse.Namespace):
         )
 
         ####### Prepare the KV cache for the sender #####
-        kv_cache = allocate_kv_cache(args.num_blocks, block_len, dtype, args.device_type, sender=True)
+        kv_cache = allocate_kv_cache(args.num_blocks, block_len, dtype, args.device_type, args.device_id, sender=True)
         print("Allocated sender KV cache")
         print(f"Tensor hash: {tensor_hash(kv_cache)}")
         torch.save(kv_cache.cpu(), "sent_kv_cache.pt")
@@ -335,7 +341,7 @@ def receiver_process(args: argparse.Namespace):
         logging.info("Preparing local KV cache...")
         dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
         local_kv_cache = allocate_kv_cache(
-            sender_meta.num_blocks, sender_meta.block_len, dtype, args.device_type, sender=False
+            sender_meta.num_blocks, sender_meta.block_len, dtype, args.device_type, args.device_id, sender=False
         )
         print("Allocated local KV cache")
         print(local_kv_cache.abs().mean())
@@ -426,6 +432,7 @@ if __name__ == "__main__":
     parser.add_argument("--ucx-transport", type=str, default=None, help="default is tcp, you might configure as 'cuda_copy,sm'")
     parser.add_argument("--debug-ucx", action="store_true",
                         help="Enable debug mode for UCX backend (if using UCX backend)")
+    parser.add_argument("--device-id", type=int, default=0, help="Device ID to use if applicable")
     args = parser.parse_args()
     
     # NIXL_PLUGIN_DIR=/workspace/nixl/nixl-nixl_libfabric/build/cp310/src/plugins/libfabric python nixl_api.py  --device-type hpu --nixl_backend libfabric
