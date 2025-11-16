@@ -84,9 +84,9 @@ def allocate_kv_cache(args):
     return kv_cache
 
 
-def create_xfer_descs(agent: NixlAgent, base_addr: int, num_blocks: int, block_len: int, mem_type: str):
+def create_xfer_descs(agent: NixlAgent, base_addr: int, num_blocks: int, block_len: int, mem_type: str, device_id: int):
     """Create transfer descriptors for a block range."""
-    blocks_data = [(base_addr + i * block_len, block_len, 0) for i in range(num_blocks)]
+    blocks_data = [(base_addr + i * block_len, block_len, device_id) for i in range(num_blocks)]
     return agent.get_xfer_descs(blocks_data, mem_type)
 
 
@@ -167,7 +167,7 @@ def add_remote_agent(agent: NixlAgent, sender_meta: NixlAgentMetadata, args: arg
     
     remote_xfer_descs = create_xfer_descs(
         agent, sender_meta.kv_caches_base_addr[0], sender_meta.num_blocks,
-        sender_meta.block_len, args.nixl_memory_type
+        sender_meta.block_len, args.nixl_memory_type, args.device_id
     )
     remote_xfer_handle = agent.prep_xfer_dlist(remote_agent_name, remote_xfer_descs)
     return agent, remote_xfer_handle
@@ -203,13 +203,13 @@ def sender_process(args: argparse.Namespace):
         logging.info(f"Tensor hash: {tensor_hash(kv_cache)}")
         # torch.save(kv_cache.cpu(), "sent_kv_cache.pt")
         reg_descs = agent.get_reg_descs(
-            [(kv_cache.data_ptr(), kv_cache.numel() * kv_cache.element_size(), 0, "")],
+            [(kv_cache.data_ptr(), kv_cache.numel() * kv_cache.element_size(), args.device_id, "")],
             args.nixl_memory_type
         )
         agent.register_memory(reg_descs, backends=[args.nixl_backend])
 
         base_addr = kv_cache.data_ptr()
-        local_xfer_descs = create_xfer_descs(agent, base_addr, args.num_blocks, block_len, args.nixl_memory_type)
+        local_xfer_descs = create_xfer_descs(agent, base_addr, args.num_blocks, block_len, args.nixl_memory_type, args.device_id)
         agent.prep_xfer_dlist('NIXL_INIT_AGENT', local_xfer_descs)
         ##################################################
 
@@ -320,13 +320,13 @@ def receiver_process(args: argparse.Namespace):
         local_base_addr = local_kv_cache.data_ptr()
         logging.info("Registering local memory...")
         reg_descs = agent.get_reg_descs(
-            [(local_base_addr, local_kv_cache.numel() * local_kv_cache.element_size(), 0, "")],
+            [(local_base_addr, local_kv_cache.numel() * local_kv_cache.element_size(), args.device_id, "")],
             args.nixl_memory_type
         )
         agent.register_memory(reg_descs, backends=[args.nixl_backend])
         logging.info("Creating local transfer descriptors...")
         local_xfer_descs = create_xfer_descs(
-            agent, local_base_addr, sender_meta.num_blocks, sender_meta.block_len, args.nixl_memory_type
+            agent, local_base_addr, sender_meta.num_blocks, sender_meta.block_len, args.nixl_memory_type, args.device_id
         )
         local_xfer_handle = agent.prep_xfer_dlist('NIXL_INIT_AGENT', local_xfer_descs)
         logging.info("Local setup complete")
