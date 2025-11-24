@@ -23,6 +23,8 @@ import msgspec
 import torch
 import zmq
 import pandas as pd
+import copy
+import numpy as np
 # ==============================================================================
 # Configuration
 # ==============================================================================
@@ -36,13 +38,14 @@ logging.basicConfig(
     level=logging.INFO,
     format="[%(levelname)s][%(processName)s][%(asctime)s] %(message)s",
 )
+os.environ['NIXL_TELEMETRY_ENABLE']='1'
 
 # Assuming 'nixl_agent' is the class name provided by the library.
 from nixl._api import nixl_agent as NixlAgent
 from nixl._api import nixl_agent_config
 import nixl._bindings
-
-
+from nixl._bindings import nixlXferTelemetry
+from dataclasses import dataclass
 class NixlAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     """Metadata structure exchanged between sender and receiver."""
     engine_id: str
@@ -51,6 +54,99 @@ class NixlAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     num_blocks: int
     block_len: int
 
+@dataclass
+class NixlKVConnectorStats:
+    """Container for transfer performance metrics"""
+
+    def __init__(self):
+        # if not self.data:
+        #     # Empty container init, no data is passed in.
+        self.reset()
+
+    def reset(self):
+        # Must be serializable
+        self.data: dict[str, list[float]] = {
+            "transfer_duration": [],
+            "post_duration": [],
+            "bytes_transferred": [],
+            "num_descriptors": [],
+            "num_failed_transfers": [],
+            "num_failed_notifications": [],
+        }
+
+    def record_transfer(self, res: nixlXferTelemetry):
+        # Keep metrics units consistent with rest of the code: time us->s
+        self.data["transfer_duration"].append(res.xferDuration / 1e6)
+        self.data["post_duration"].append(res.postDuration / 1e6)
+        self.data["bytes_transferred"].append(res.totalBytes)
+        self.data["num_descriptors"].append(res.descCount)
+
+    def record_failed_transfer(self):
+        """Record a failed NIXL transfer operation."""
+        self.data["num_failed_transfers"].append(1.0)
+
+    def record_failed_notification(self):
+        """Record a failed NIXL notification (send_notif)."""
+        self.data["num_failed_notifications"].append(1.0)
+
+    def clone_and_reset(self) -> "NixlKVConnectorStats":
+        old = copy.copy(self)
+        self.reset()
+        return old
+
+    def is_empty(self) -> bool:
+        return self.num_successful_transfers == 0
+
+    # def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+    #     if not other.is_empty():
+    #         for k, v in other.data.items():
+    #             accumulator = self.data[k]
+    #             assert isinstance(accumulator, list)
+    #             accumulator.extend(v)
+    #     return self
+
+    def reduce(self) -> dict[str, int | float]:
+        # Compute compact representative stats suitable for CLI logging
+        if self.is_empty():
+            return {
+                "Num successful transfers": 0,
+                "Avg xfer time (ms)": 0,
+                "P90 xfer time (ms)": 0,
+                "Avg post time (ms)": 0,
+                "P90 post time (ms)": 0,
+                "Avg MB per transfer": 0,
+                "Throughput (MB/s)": 0,
+                "Avg number of descriptors": 0,
+            }
+
+        xfer_time = np.asarray(self.data["transfer_duration"])
+        post_time = np.asarray(self.data["post_duration"])
+        # Convert to MB for CLI logging.
+        mb = np.asarray(self.data["bytes_transferred"]) / 2**20
+        descs = np.asarray(self.data["num_descriptors"], dtype=np.uint32)
+        n = len(descs)
+        assert n == self.num_successful_transfers
+
+        total_mb = mb.sum()
+        avg_mb = total_mb / n
+
+        total_time_seconds = xfer_time.sum()
+        throughput_mb_s = total_mb / total_time_seconds
+
+        return {
+            "Num successful transfers": n,
+            "Avg xfer time (ms)": round(xfer_time.mean() * 1e3, 3),
+            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90) * 1e3, 3),
+            "Avg post time (ms)": round(post_time.mean() * 1e3, 3),
+            "P90 post time (ms)": round(np.percentile(post_time, 90) * 1e3, 3),
+            "Avg MB per transfer": round(avg_mb, 3),
+            "Throughput (MB/s)": round(throughput_mb_s, 3),
+            "Avg number of descriptors": round(descs.mean(), 1),
+        }
+
+    @property
+    def num_successful_transfers(self) -> int:
+        return len(self.data["transfer_duration"])
 
 # ==============================================================================
 # Helpers
@@ -98,7 +194,7 @@ def create_xfer_descs(agent: NixlAgent, base_addr: int, num_blocks: int, block_l
 
 
 def read_blocks(block_ids: Iterator[int], agent: NixlAgent,
-                local_xfer_handle: str, remote_xfer_handle: str, sender_meta: NixlAgentMetadata):
+                local_xfer_handle: str, remote_xfer_handle: str, sender_meta: NixlAgentMetadata, xfer_stats: NixlKVConnectorStats):
     """ Read blocks from the sender's KV cache using NIXL. """
     if not block_ids:
         logging.warning("No block IDs provided for transfer.")
@@ -121,6 +217,8 @@ def read_blocks(block_ids: Iterator[int], agent: NixlAgent,
         time.sleep(0.00001)
     
     t1 = time.perf_counter_ns()  # End timing after verification
+    res = agent.get_xfer_telemetry(xfer_handle)
+    xfer_stats.record_transfer(res)
     agent.release_xfer_handle(xfer_handle)
     
     return (t1 - t0) / 1e6, len(local_ids) * sender_meta.block_len  # Return latency in ms
@@ -341,6 +439,7 @@ def receiver_process(args: argparse.Namespace):
         total_data_transferred = 0
         logging.info(f"Starting transfer loop for {args.num_iterations} iterations...")
 
+        xfer_stats = NixlKVConnectorStats()
         for i in range(args.num_iterations):
             # if i % 10 == 0:  # Log every 10th iteration
             logging.info(f"Transfer iteration {i+1}/{args.num_iterations}")
@@ -348,7 +447,7 @@ def receiver_process(args: argparse.Namespace):
             print(f"Transferring blocks {start_idx} to {start_idx + args.blocks_per_xfer - 1}")
             block_ids = list(range(start_idx, start_idx + args.blocks_per_xfer))
             # do transfer
-            latency, data_transferred = read_blocks(block_ids, agent, local_xfer_handle, remote_xfer_handle, sender_meta)
+            latency, data_transferred = read_blocks(block_ids, agent, local_xfer_handle, remote_xfer_handle, sender_meta, xfer_stats)
             # time.sleep(2)
             latencies.append(latency)
             total_data_transferred += data_transferred
@@ -358,6 +457,7 @@ def receiver_process(args: argparse.Namespace):
         torch.save(local_kv_cache.cpu(), "received_kv_cache.pt")
         # Print summary after successful completion
         logging.info("All transfers completed successfully")
+        logging.info(xfer_stats.reduce())
         summary(latencies, sender_meta, args, total_data_transferred, agent)
         
         # Send shutdown signal only after successful completion
@@ -403,6 +503,7 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "bf16"])
     parser.add_argument("--blocks-per-xfer", type=int, default=256)
     parser.add_argument("--num-iterations", type=int, default=100)
+    parser.add_argument("--kv-cache-size", type=int, default=256)
     parser.add_argument("--nixl-memory-type", type=str, default="VRAM", choices=["DRAM", "VRAM"])
     parser.add_argument("--device-type", type=str, default="cpu", choices=["cpu", "cuda", "xpu", "hpu"])
     parser.add_argument("--nixl_backend", type=str, default="OFI")
