@@ -8,7 +8,7 @@ This version fixes a potential INVALID_PARAM error and improves process synchron
 transfer token length is num-blocks * block_size
 Example usage:
 # llama3.1 8B
-python examples/python/nixl_api_test.py --nixl_backend UCX --device-type cuda  --ucx-transport "tcp,cuda_copy,cuda_ipc" --num-heads 8 --head-size 128 --num-layers 32 --num-blocks 64 --blocks-per-xfer 64
+python examples/python/nixl_perf_test_v2.py --nixl_backend UCX --device-type cuda  --ucx-transport "tcp,cuda_copy,cuda_ipc" --MB-size 1024 --num-iterations 10 --device-id 1
 """
 
 import argparse
@@ -28,7 +28,7 @@ import pandas as pd
 # ==============================================================================
 
 ZMQ_HOST = "127.0.0.1"
-ZMQ_BASE_PORT = 15555
+# ZMQ_BASE_PORT = 15555
 GET_META_MSG = b"get_meta_msg"
 SHUTDOWN_MSG = b"shutdown_msg"
 
@@ -69,8 +69,8 @@ def get_block_desc_ids(num_total_blocks: int, block_ids: Iterator[int]) -> List[
     """
     return list(block_ids)
 
-def allocate_kv_cache(args):
-    total_bytes = args.kb_size * 1024
+def allocate_kv_cache(args, device_id):
+    total_bytes = args.MB_size * 1024 * 1024
     dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
     bytes_per_element = dtype.itemsize
     
@@ -78,7 +78,7 @@ def allocate_kv_cache(args):
 
     device_str = args.device_type
     if args.device_type != "cpu":
-        device_str = f"{args.device_type}:{args.device_id}"
+        device_str = f"{args.device_type}:{device_id}"
     kv_cache = torch.randn(num_elements, dtype=dtype, device=device_str)
     print(f"KV cache allocated on {device_str} with shape {kv_cache.shape} and dtype {kv_cache.dtype}")
     return kv_cache
@@ -100,7 +100,7 @@ def read_blocks(block_ids: Iterator[int], agent: NixlAgent,
     local_ids = get_block_desc_ids(sender_meta.num_blocks, block_ids)
     remote_ids = get_block_desc_ids(sender_meta.num_blocks, block_ids)
     
-    t0 = time.perf_counter_ns()
+    
     xfer_handle = agent.make_prepped_xfer(
         "READ",
         local_xfer_handle,
@@ -108,6 +108,7 @@ def read_blocks(block_ids: Iterator[int], agent: NixlAgent,
         remote_xfer_handle,
         remote_ids,
     )
+    t0 = time.perf_counter_ns()
     agent.transfer(xfer_handle)
 
     while agent.check_xfer_state(xfer_handle) != "DONE":
@@ -136,7 +137,7 @@ def summary(latencies: List[float], sender_meta: NixlAgentMetadata, args: argpar
     print(f" NIXL Backend:          {backend_name}")
     print(f" Total Iterations:      {args.num_iterations:,}")
     print(f" Blocks per Transfer:   {args.blocks_per_xfer:,}")
-    print(f" Data per Transfer:     {args.kb_size} KB")
+    print(f" Data per Transfer:     {args.MB_size} MB")
     print("-" * 60)
     print(f" Average Latency:       {avg_latency_ms:.3f} ms")
     print(f" Total Throughput:      {throughput_gbps:.3f} GB/s")
@@ -157,7 +158,7 @@ def summary(latencies: List[float], sender_meta: NixlAgentMetadata, args: argpar
     print("=" * 60 + "\n")
 
 
-def add_remote_agent(agent: NixlAgent, sender_meta: NixlAgentMetadata, args: argparse.Namespace): 
+def add_remote_agent(agent: NixlAgent, sender_meta: NixlAgentMetadata, args: argparse.Namespace, device_id=0): 
     remote_agent_name = agent.add_remote_agent(sender_meta.agent_metadata)
     if isinstance(remote_agent_name, bytes):
         remote_agent_name = remote_agent_name.decode('utf-8')
@@ -167,7 +168,7 @@ def add_remote_agent(agent: NixlAgent, sender_meta: NixlAgentMetadata, args: arg
     
     remote_xfer_descs = create_xfer_descs(
         agent, sender_meta.kv_caches_base_addr[0], sender_meta.num_blocks,
-        sender_meta.block_len, args.nixl_memory_type, args.device_id
+        sender_meta.block_len, args.nixl_memory_type, device_id
     )
     remote_xfer_handle = agent.prep_xfer_dlist(remote_agent_name, remote_xfer_descs)
     return agent, remote_xfer_handle
@@ -185,7 +186,7 @@ def sender_process(args: argparse.Namespace):
     logging.info("Sender starting...")
     agent = None
     config = nixl_agent_config(backends=[args.nixl_backend])
-    
+    # os.environ['UCX_NET_DEVICES'] = f'mlx5_{args.sender_device_id // 2}:1'
     try:
         sender_agent_id = str(uuid.uuid4())
         try:
@@ -197,19 +198,20 @@ def sender_process(args: argparse.Namespace):
             return
 
         ####### Prepare the KV cache for the sender #####
-        kv_cache = allocate_kv_cache(args)
-        block_len = args.kb_size * 1024
+        # device_id = 0
+        kv_cache = allocate_kv_cache(args, args.sender_device_id)
+        block_len = args.MB_size * 1024 * 1024
         logging.info("Allocated sender KV cache")
         logging.info(f"Tensor hash: {tensor_hash(kv_cache)}")
         # torch.save(kv_cache.cpu(), "sent_kv_cache.pt")
         reg_descs = agent.get_reg_descs(
-            [(kv_cache.data_ptr(), kv_cache.numel() * kv_cache.element_size(), args.device_id, "")],
+            [(kv_cache.data_ptr(), kv_cache.numel() * kv_cache.element_size(), args.sender_device_id, "")],
             args.nixl_memory_type
         )
         agent.register_memory(reg_descs, backends=[args.nixl_backend])
 
         base_addr = kv_cache.data_ptr()
-        local_xfer_descs = create_xfer_descs(agent, base_addr, args.num_blocks, block_len, args.nixl_memory_type, args.device_id)
+        local_xfer_descs = create_xfer_descs(agent, base_addr, args.num_blocks, block_len, args.nixl_memory_type, args.sender_device_id)
         agent.prep_xfer_dlist('NIXL_INIT_AGENT', local_xfer_descs)
         ##################################################
 
@@ -224,7 +226,7 @@ def sender_process(args: argparse.Namespace):
         encoded_metadata = encoder.encode(metadata)
 
         with zmq.Context() as ctx, ctx.socket(zmq.ROUTER) as sock:
-            zmq_addr = f"tcp://{ZMQ_HOST}:{ZMQ_BASE_PORT}"
+            zmq_addr = f"tcp://{ZMQ_HOST}:{args.zmq_port}"
             sock.bind(zmq_addr)
             logging.info(f"Sender listening for handshakes on {zmq_addr}")
 
@@ -256,11 +258,11 @@ def sender_process(args: argparse.Namespace):
 
 # ------------------------------------------------------------------------------
 
-def send_shutdown_signal():
+def send_shutdown_signal(args: argparse.Namespace):
     """Helper function to send shutdown signal to sender."""
     try:
         with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
-            zmq_addr = f"tcp://{ZMQ_HOST}:{ZMQ_BASE_PORT}"
+            zmq_addr = f"tcp://{ZMQ_HOST}:{args.zmq_port}"
             sock.connect(zmq_addr)
             logging.info("Sending shutdown signal to sender.")
             sock.send(SHUTDOWN_MSG)
@@ -277,10 +279,11 @@ def receiver_process(args: argparse.Namespace):
     logging.info("Receiver starting...")
     agent = None
     config = nixl_agent_config(backends=[args.nixl_backend])
-    
+    # os.environ['UCX_NET_DEVICES'] = f'mlx5_{args.receiver_device_id // 2}:1'
+
     def cleanup_and_shutdown():
         """Send shutdown signal and cleanup."""
-        send_shutdown_signal()
+        send_shutdown_signal(args)
         logging.info("Receiver shutting down.")
     
     try:
@@ -298,7 +301,7 @@ def receiver_process(args: argparse.Namespace):
 
         logging.info("Requesting metadata from sender...")
         with zmq.Context() as ctx, ctx.socket(zmq.REQ) as sock:
-            zmq_addr = f"tcp://{ZMQ_HOST}:{ZMQ_BASE_PORT}"
+            zmq_addr = f"tcp://{ZMQ_HOST}:{args.zmq_port}"
             sock.connect(zmq_addr)
             logging.info(f"Requesting metadata from sender at {zmq_addr}...")
             sock.send(GET_META_MSG)
@@ -308,7 +311,8 @@ def receiver_process(args: argparse.Namespace):
         logging.info(f"Received metadata from sender engine: {sender_meta.engine_id}")
 
         logging.info("Adding remote agent...")
-        agent, remote_xfer_handle = add_remote_agent(agent, sender_meta, args)
+        # device_id = 0
+        agent, remote_xfer_handle = add_remote_agent(agent, sender_meta, args, args.sender_device_id)
         logging.info("Remote agent added successfully")
         
         # Give sender time to be fully ready
@@ -316,17 +320,19 @@ def receiver_process(args: argparse.Namespace):
         
         ####### Prepare the KV cache for the receiver #####
         logging.info("Preparing local KV cache...")
-        local_kv_cache = allocate_kv_cache(args)
+        
+        # device_id = 4
+        local_kv_cache = allocate_kv_cache(args, args.receiver_device_id)
         local_base_addr = local_kv_cache.data_ptr()
         logging.info("Registering local memory...")
         reg_descs = agent.get_reg_descs(
-            [(local_base_addr, local_kv_cache.numel() * local_kv_cache.element_size(), args.device_id, "")],
+            [(local_base_addr, local_kv_cache.numel() * local_kv_cache.element_size(), args.receiver_device_id, "")],
             args.nixl_memory_type
         )
         agent.register_memory(reg_descs, backends=[args.nixl_backend])
         logging.info("Creating local transfer descriptors...")
         local_xfer_descs = create_xfer_descs(
-            agent, local_base_addr, sender_meta.num_blocks, sender_meta.block_len, args.nixl_memory_type, args.device_id
+            agent, local_base_addr, sender_meta.num_blocks, sender_meta.block_len, args.nixl_memory_type, args.receiver_device_id
         )
         local_xfer_handle = agent.prep_xfer_dlist('NIXL_INIT_AGENT', local_xfer_descs)
         logging.info("Local setup complete")
@@ -345,7 +351,7 @@ def receiver_process(args: argparse.Namespace):
             # do transfer
             latency, _ = read_blocks(block_ids, agent, local_xfer_handle, remote_xfer_handle, sender_meta)
             latencies.append(latency)
-            total_data_transferred += args.kb_size * 1024
+            total_data_transferred += args.MB_size * 1024 * 1024
 
         logging.info("Transferred local KV cache")
         logging.info(f"Tensor hash: {tensor_hash(local_kv_cache)}")
@@ -397,7 +403,7 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "bf16"])
     parser.add_argument("--blocks-per-xfer", type=int, default=1)
     parser.add_argument("--num-iterations", type=int, default=100)
-    parser.add_argument("--kb-size", type=int, default=1, help="Size of KV cache in KB")
+    parser.add_argument("--MB-size", type=int, default=1, help="Size of KV cache in MB")
     parser.add_argument("--nixl-memory-type", type=str, default="VRAM", choices=["DRAM", "VRAM"])
     parser.add_argument("--device-type", type=str, default="cpu", choices=["cpu", "cuda", "xpu", "hpu"])
     parser.add_argument("--nixl_backend", type=str, default="OFI")
@@ -405,7 +411,9 @@ if __name__ == "__main__":
     parser.add_argument("--ucx-transport", type=str, default=None, help="default is tcp, you might configure as 'cuda_copy,sm'")
     parser.add_argument("--debug-ucx", action="store_true",
                         help="Enable debug mode for UCX backend (if using UCX backend)")
-    parser.add_argument("--device-id", type=int, default=0, help="Device ID to use if applicable")
+    parser.add_argument("--sender-device-id", type=int, default=0, help="Sender device ID to use if applicable")
+    parser.add_argument("--receiver-device-id", type=int, default=0, help="Receiver device ID to use if applicable")
+    parser.add_argument("--zmq-port", type=int, default=8110, help="Base port for ZMQ communication")
     args = parser.parse_args()
     assert args.num_blocks == 1
 

@@ -4,6 +4,11 @@ NIXL API Performance Benchmark (Corrected & Improved)
 
 Simulates sender/receiver engines transferring KV cache blocks over NIXL.
 This version fixes a potential INVALID_PARAM error and improves process synchronization.
+
+transfer token length is num-blocks * block_size
+Example usage:
+# llama3.1 8B
+python examples/python/nixl_api_test.py --nixl_backend UCX --device-type cuda  --ucx-transport "tcp,cuda_copy,cuda_ipc" --num-heads 8 --head-size 128 --num-layers 32 --num-blocks 64 --blocks-per-xfer 64
 """
 
 import argparse
@@ -65,29 +70,25 @@ def get_block_desc_ids(num_total_blocks: int, block_ids: Iterator[int]) -> List[
     return list(block_ids)
 
 
-def allocate_kv_cache(num_blocks: int, block_len: int, dtype: torch.dtype, device: str, device_id: int, sender=True) -> torch.Tensor:
+def allocate_kv_cache(args):
     """Allocate a KV cache buffer on the given device."""
-    total_bytes = num_blocks * block_len
+    dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
+    block_len = (
+        args.num_heads * args.head_size * 2 * args.block_size * dtype.itemsize * args.num_layers
+    )
+    total_bytes = args.num_blocks * block_len
     num_elements = total_bytes // dtype.itemsize
     logging.info(
         f"Allocating KV cache: {total_bytes / 1e6:.2f} MB "
-        f"({num_elements:,} elements, {dtype}, {device})"
+        f"({num_elements:,} elements, {dtype}, {args.device_type})"
     )
     
-    # Map device types to PyTorch device strings
-    if device == "hpu":
-        device = "hpu"  # Use HPU device for Intel Gaudi
-    
-    device_str = device
-    if device != "cpu":
-        device_str = f"{device}:{device_id}"
-
-    if sender:
-        ret = torch.randn(num_elements, dtype=dtype, device=device_str)
-    else:
-        ret = torch.empty(num_elements, dtype=dtype, device=device_str)
-    print(f"KV cache allocated on {device_str} with shape {ret.shape} and dtype {ret.dtype}")
-    return ret
+    device_str = args.device_type
+    if args.device_type != "cpu":
+        device_str = f"{args.device_type}:{args.device_id}"
+    kv_cache = torch.randn(num_elements, dtype=dtype, device=device_str)
+    print(f"KV cache allocated on {device_str} with shape {kv_cache.shape} and dtype {kv_cache.dtype}")
+    return block_len, kv_cache
 
 
 def create_xfer_descs(agent: NixlAgent, base_addr: int, num_blocks: int, block_len: int, mem_type: str):
@@ -102,8 +103,7 @@ def read_blocks(block_ids: Iterator[int], agent: NixlAgent,
     if not block_ids:
         logging.warning("No block IDs provided for transfer.")
         return 0, 0
-    
-    # try:
+
     local_ids = get_block_desc_ids(sender_meta.num_blocks, block_ids)
     remote_ids = get_block_desc_ids(sender_meta.num_blocks, block_ids)
     
@@ -120,23 +120,10 @@ def read_blocks(block_ids: Iterator[int], agent: NixlAgent,
     while agent.check_xfer_state(xfer_handle) != "DONE":
         time.sleep(0.00001)
     
-    # Add data verification to ensure end-to-end transfer completion
-    try:
-        if local_kv_cache is not None:
-            # Verify data is accessible by reading a small sample
-            sample_data = local_kv_cache[:min(64, local_kv_cache.numel())]
-            # Could also check for expected patterns or non-zero values
-            _ = sample_data.sum()  # Force computation to ensure data is accessible
-    except Exception as e:
-        logging.debug(f"Data verification skipped: {e}")
-    
     t1 = time.perf_counter_ns()  # End timing after verification
     agent.release_xfer_handle(xfer_handle)
     
     return (t1 - t0) / 1e6, len(local_ids) * sender_meta.block_len  # Return latency in ms
-    # except Exception as e:
-    #     logging.error(f"Transfer failed in read_blocks: {e}", exc_info=True)
-    #     raise
 
 
 def summary(latencies: List[float], sender_meta: NixlAgentMetadata, args: argparse.Namespace, total_data_transferred: int, agent: NixlAgent):
@@ -215,15 +202,10 @@ def sender_process(args: argparse.Namespace):
             logging.error("Sender process cannot continue. Exiting.")
             return
 
-        dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
-        block_len = (
-            args.num_heads * args.head_size * 2 * args.block_size * dtype.itemsize
-        )
-
         ####### Prepare the KV cache for the sender #####
-        kv_cache = allocate_kv_cache(args.num_blocks, block_len, dtype, args.device_type, args.device_id, sender=True)
-        print("Allocated sender KV cache")
-        print(f"Tensor hash: {tensor_hash(kv_cache)}")
+        block_len, kv_cache = allocate_kv_cache(args)
+        logging.info("Allocated sender KV cache")
+        logging.info(f"Tensor hash: {tensor_hash(kv_cache)}")
         torch.save(kv_cache.cpu(), "sent_kv_cache.pt")
         reg_descs = agent.get_reg_descs(
             [(kv_cache.data_ptr(), kv_cache.numel() * kv_cache.element_size(), 0, "")],
@@ -339,12 +321,7 @@ def receiver_process(args: argparse.Namespace):
         
         ####### Prepare the KV cache for the receiver #####
         logging.info("Preparing local KV cache...")
-        dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
-        local_kv_cache = allocate_kv_cache(
-            sender_meta.num_blocks, sender_meta.block_len, dtype, args.device_type, args.device_id, sender=False
-        )
-        print("Allocated local KV cache")
-        print(local_kv_cache.abs().mean())
+        block_len, local_kv_cache = allocate_kv_cache(args)
         local_base_addr = local_kv_cache.data_ptr()
         logging.info("Registering local memory...")
         reg_descs = agent.get_reg_descs(
@@ -376,8 +353,8 @@ def receiver_process(args: argparse.Namespace):
             latencies.append(latency)
             total_data_transferred += data_transferred
 
-        print("transfered local KV cache")
-        print(f"Tensor hash: {tensor_hash(local_kv_cache)}")
+        logging.info("Transferred local KV cache")
+        logging.info(f"Tensor hash: {tensor_hash(local_kv_cache)}")
         torch.save(local_kv_cache.cpu(), "received_kv_cache.pt")
         # Print summary after successful completion
         logging.info("All transfers completed successfully")
@@ -418,10 +395,11 @@ if __name__ == "__main__":
     multiprocessing.set_start_method('spawn')
 
     parser = argparse.ArgumentParser(description="Benchmark script for nixl._api performance.")
-    parser.add_argument("--num-blocks", type=int, default=512)
+    parser.add_argument("--num-blocks", type=int, default=4096)
     parser.add_argument("--block-size", type=int, default=16, help="Tokens per block")
     parser.add_argument("--num-heads", type=int, default=32)
     parser.add_argument("--head-size", type=int, default=128)
+    parser.add_argument("--num-layers", type=int, default=32)
     parser.add_argument("--dtype", type=str, default="fp16", choices=["fp16", "bf16"])
     parser.add_argument("--blocks-per-xfer", type=int, default=256)
     parser.add_argument("--num-iterations", type=int, default=100)
